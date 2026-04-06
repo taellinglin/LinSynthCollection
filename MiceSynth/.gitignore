@@ -1,0 +1,12 @@
+/target/
+*.log
+*.tmp
+*.bak
+*.swp
+*.rs.bk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.cargo/
+**/.cache/

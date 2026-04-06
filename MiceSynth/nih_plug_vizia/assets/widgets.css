@@ -1,0 +1,163 @@
+generic-ui {
+  child-space: 10px;
+  col-between: 5px;
+  layout-type: column;
+  row-between: 5px;
+  color: #ffffff; /* Text color - white */
+  background-color: #181818; /* Even darker background */
+}
+
+scrollview > vstack > generic-ui {
+  child-space: 5px;
+  child-right: 0;
+}
+
+generic-ui .row {
+  col-between: 6px;
+  layout-type: row;
+}
+
+generic-ui .label {
+  left: 1s;
+  top: 1s;
+  bottom: 1s;
+  right: 0;
+  color: #ffffff; /* Label text color - white */
+}
+
+param-button {
+  height: 30px;
+  width: auto;
+  border-color: #ffffff; /* Border color - white */
+  border-width: 1px;
+  child-top: 1s;
+  child-right: 7px;
+  child-bottom: 1s;
+  child-left: 7px;
+  background-color: #3D3D3D; /* Darker gray for buttons */
+  transition: background-color 0.1 0;
+}
+
+param-button:hover {
+  background-color: #4D4D4D; /* Lighter gray on hover */
+  transition: background-color 0.1 0;
+}
+
+param-button:checked {
+  background-color: #ffffff; /* Yellow when checked */
+  transition: background-color 0.1 0;
+}
+
+param-slider {
+  height: 30px;
+  width: 180px;
+  border-color: #4d0b0b; /* Border color - dark red */
+  border-width: 1px;
+  background-color: #232323; /* Slider background color - even darker gray */
+  transition: background-color 0.1 0;
+  color: #e0e0e0; /* Slider text color - light gray */
+}
+
+param-slider .fill {
+  background-color: #FF0000; /* Fill color - red */
+}
+
+seq-step-box {
+  width: 14px;
+  height: 32px;
+}
+
+
+param-slider .value-entry {
+  background-color: transparent;
+  border-width: 0px;
+}
+
+param-slider .value-entry .caret {
+  background-color: #ffffff; /* Caret color - white */
+}
+
+param-slider .value-entry .selection {
+  background-color: #ffffff30; /* Selection color - white with some transparency */
+}
+
+peak-meter {
+  height: 30px;
+  width: 180px;
+}
+
+peak-meter .bar {
+  height: 50%;
+  border-width: 1px;
+  border-color: #ffffff; /* Bar border color - white */
+}
+
+peak-meter .ticks {
+  height: 50%;
+}
+
+peak-meter .ticks__tick {
+  background-color: #ffffff; /* Ticks color - white */
+  top: 0;
+  width: 1px;
+  height: 30%;
+}
+
+peak-meter .ticks__label {
+  top: 4px;
+  font-size: 11;
+}
+
+resize-handle {
+  bottom: 0;
+  color: #ff0000; /* Resize handle color - yellow */
+  height: 20px;
+  left: 1s;
+  opacity: 0.4;
+  position-type: self-directed;
+  right: 0;
+  top: 1s;
+  transition: opacity 0.1 0;
+  width: 20px;
+  z-index: 1337;
+}
+
+resize-handle:active {
+  opacity: 0.8;
+  transition: opacity 0.1 0;
+}
+
+resize-handle:hover {
+  opacity: 0.8;
+  transition: opacity 0.1 0;
+}
+
+button.preset-button {
+  background-color: #2a2a2a;
+  border-color: #4a4a4a;
+  border-width: 1px;
+  child-left: 6px;
+  child-right: 6px;
+}
+
+button.preset-button:hover {
+  background-color: #3a3a3a;
+}
+
+button.preset-button.preset-selected {
+  background-color: #2f4a34;
+  border-color: #6bbd7a;
+  color: #ffffff;
+}
+
+button.preset-category {
+  background-color: #262626;
+  border-color: #3a3a3a;
+  border-width: 1px;
+  child-left: 6px;
+  child-right: 6px;
+}
+
+button.preset-category:hover {
+  background-color: #333333;
+}
