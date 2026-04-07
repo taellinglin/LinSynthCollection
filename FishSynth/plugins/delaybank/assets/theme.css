@@ -1,0 +1,100 @@
+:root {
+    --bg: #0f1a1e;
+    --panel: #1a2a30;
+    --accent: #32c0a8;
+    --accent-2: #f0b14a;
+    --text: #e8f5f2;
+    --muted: #8fb3ad;
+    --danger: #e06b6b;
+    --pixel: 2px;
+}
+
+* {
+    font-family: "Courier New", monospace;
+    font-size: 14px;
+}
+
+label {
+    color: var(--text);
+}
+
+vstack, hstack {
+    background-color: var(--bg);
+}
+
+.container {
+    background-color: var(--panel);
+    border-width: 2px;
+    border-color: var(--accent);
+    border-radius: 4px;
+    padding: 8px;
+}
+
+.title {
+    font-size: 22px;
+    letter-spacing: 1px;
+    color: var(--accent-2);
+}
+
+.section {
+    background-color: #132126;
+    border-width: 1px;
+    border-color: #2a3c43;
+    border-radius: 4px;
+    padding: 6px;
+}
+
+.small {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.param-slider {
+    height: 16px;
+}
+
+.knob {
+    width: 64px;
+    height: 64px;
+    border-radius: 32px;
+    background-color: #b21d1d;
+    border-width: 2px;
+    border-color: #f25f5f;
+    box-shadow: inset 0 0 0 2px #711111;
+}
+
+.knob .fill {
+    background-color: #ff6b6b;
+}
+
+.knob .value {
+    color: #fff0f0;
+}
+
+.knob-small {
+    width: 40px;
+    height: 40px;
+    border-radius: 20px;
+    background-color: #9e1818;
+    border-width: 2px;
+    border-color: #f25f5f;
+}
+
+.knob-small .fill {
+    background-color: #ff7a7a;
+}
+
+.scope {
+    background-color: #0c1418;
+    border-width: 1px;
+    border-color: #2b3b42;
+    border-radius: 4px;
+}
+
+button {
+    background-color: #16272d;
+    color: var(--text);
+    border-width: 1px;
+    border-color: var(--accent);
+    border-radius: 4px;
+}

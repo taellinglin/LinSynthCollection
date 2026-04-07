@@ -1,0 +1,25 @@
+[package]
+name = "sannysynth"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ling Lin <taellinglin@gmail.com>"]
+license = "ISC"
+include = ["assets/**"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nih_plug = { path = "../../", features = ["assert_process_allocs"] }
+nih_plug_vizia = { path = "../../nih_plug_vizia" }
+
+
+enum-iterator = "1.4.1"
+atomic_float = "0.1"
+
+rand = "0.8.5"
+rand_pcg = "0.3.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hound = "3.5"
+windows-sys = { version = "0.52", features = ["Win32_UI_Controls_Dialogs", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory"] }

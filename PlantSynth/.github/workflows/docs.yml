@@ -1,0 +1,75 @@
+name: Docs
+
+on:
+  push:
+    branches:
+      - master
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  docs:
+    name: Generate and upload docs
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libgl-dev libjack-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev \
+            libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-cargo-docs-
+            ubuntu-cargo-
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Generate documentation for all targets
+        run: >-
+          cargo doc --features docs,standalone,zstd --no-deps
+          -p nih_plug
+          -p nih_plug_derive
+          -p nih_plug_egui
+          -p nih_plug_iced
+          -p nih_plug_vizia
+          -p nih_plug_xtask
+
+      - name: Add a redirect index page
+        run: |
+          cat > target/doc/index.html <<EOF
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <meta http-equiv="refresh" content="0; url=nih_plug">
+              <title>Redirecting to nih_plug documentation</title>
+            </head>
+            <body>
+              <p>Redirecting to <a href="nih_plug">nih_plug documentation</a>...</p>
+            </body>
+          </html>
+          EOF
+
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4.5.0
+        if: github.ref == 'refs/heads/master'
+        with:
+          branch: gh-pages
+          folder: target/doc
+          clean: true
