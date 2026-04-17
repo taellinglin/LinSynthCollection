@@ -81,6 +81,7 @@ struct SubSynth {
     factory_wavetable: WavetableBank,
     custom_wavetable: Option<WavetableBank>,
     custom_wavetable_path: Option<String>,
+    sample_rate: f32,
 }
 
 #[derive(Params)]
@@ -403,6 +404,7 @@ impl Default for SubSynth {
             factory_wavetable: WavetableBank::new(),
             custom_wavetable: None,
             custom_wavetable_path: None,
+            sample_rate: 44100.0,
         }
     }
 }
@@ -1191,11 +1193,12 @@ impl Plugin for SubSynth {
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         // After `PEAK_METER_DECAY_MS` milliseconds of pure silence, the peak meter's value should
         // have dropped by 12 dB
+        self.sample_rate = buffer_config.sample_rate;
         self.refresh_custom_wavetable();
         true
     }
@@ -1849,7 +1852,7 @@ impl Plugin for SubSynth {
                         let filter_vintage_curve = self.params.filter_vintage_curve.value();
                         let filter_vintage_mix = self.params.filter_vintage_mix.value();
                         let filter_vintage_trim = self.params.filter_vintage_trim.value();
-                        let filtered_sample = match voice.filter.unwrap() {
+                        let filtered_sample = match voice.filter.unwrap_or(FilterType::None) {
                             FilterType::None => generated_sample,
                             FilterType::Lowpass => {
                                 voice.lowpass_filter.set_cutoff(modulated_cutoff);
@@ -2306,10 +2309,10 @@ impl SubSynth {
             let oldest_voice = self
                 .voices
                 .iter_mut()
-                .min_by_key(|voice| voice.as_ref().unwrap().internal_voice_id)
+                .min_by_key(|voice| voice.as_ref().map(|v| v.internal_voice_id).unwrap_or(u64::MAX))
                 .unwrap();
             let oldest_voice = oldest_voice.as_mut().unwrap();
-    
+
             if oldest_voice.amp_envelope.get_state() == ADSREnvelopeState::Idle ||
                 oldest_voice.amp_envelope.get_state() == ADSREnvelopeState::Release
             {
@@ -2418,13 +2421,13 @@ impl SubSynth {
             Self::compute_fallback_voice_id(
                 note,
                 channel,
-                self.next_voice_index.try_into().unwrap(),
+                self.next_voice_index as i32,
             )
         });
 
         // If no existing voice found, create a new voice
         let (amp_envelope, filter_cut_envelope, filter_res_envelope) =
-            self.construct_envelopes(192000.0, 1.0);
+            self.construct_envelopes(self.sample_rate, 1.0);
         let mut new_voice = Voice {
             voice_id: new_voice_id,
             channel,
@@ -2440,11 +2443,11 @@ impl SubSynth {
             filter_cut_envelope,
             filter_res_envelope,
             filter: Some(self.params.filter_type.value()),
-            lowpass_filter: filter::LowpassFilter::new(1000.0, 0.5, 192000.0),
-            highpass_filter: filter::HighpassFilter::new(1000.0, 0.5, 192000.0),
-            bandpass_filter: filter::BandpassFilter::new(1000.0, 0.5, 192000.0),
-            notch_filter: filter::NotchFilter::new(1000.0, 1.0, 192000.0),
-            statevariable_filter: filter::StatevariableFilter::new(1000.0, 0.5, 192000.0),
+            lowpass_filter: filter::LowpassFilter::new(1000.0, 0.5, self.sample_rate),
+            highpass_filter: filter::HighpassFilter::new(1000.0, 0.5, self.sample_rate),
+            bandpass_filter: filter::BandpassFilter::new(1000.0, 0.5, self.sample_rate),
+            notch_filter: filter::NotchFilter::new(1000.0, 1.0, self.sample_rate),
+            statevariable_filter: filter::StatevariableFilter::new(1000.0, 0.5, self.sample_rate),
             pan,
             pressure,
             brightness,
@@ -2472,7 +2475,7 @@ impl SubSynth {
                 self.params.pan_lfo_shape.value(),
             ),
             drift_offset: 0.0,
-            resonator: ResonatorBank::new(192000.0, util::midi_note_to_freq(note)),
+            resonator: ResonatorBank::new(self.sample_rate, util::midi_note_to_freq(note)),
         };
         new_voice.amp_envelope.trigger();
         new_voice.filter_cut_envelope.trigger();
@@ -2518,6 +2521,7 @@ impl SubSynth {
         vibrato_modulator: Option<&Modulator>,
         tremolo_modulator: Option<&Modulator>,
     ) {
+        let (default_amp_env, default_cut_env, default_res_env) = self.construct_envelopes(self.sample_rate, 1.0);
         let voice = self.find_or_create_voice(
             voice_id,
             channel,
@@ -2528,11 +2532,11 @@ impl SubSynth {
             expression,
             tuning,
             vibrato,
-            amp_envelope.cloned().unwrap(),
-            filter_cut_envelope.cloned().unwrap(),
-            filter_res_envelope.cloned().unwrap(),
-            vibrato_modulator.cloned().unwrap(),
-            tremolo_modulator.cloned().unwrap(),
+            amp_envelope.cloned().unwrap_or(default_amp_env),
+            filter_cut_envelope.cloned().unwrap_or(default_cut_env),
+            filter_res_envelope.cloned().unwrap_or(default_res_env),
+            vibrato_modulator.cloned().unwrap_or_default(),
+            tremolo_modulator.cloned().unwrap_or_default(),
         );
         voice.velocity = gain;
         voice.velocity_sqrt = gain.sqrt();

@@ -189,6 +189,7 @@ struct SubSynth {
     last_note_phase_delta: f32,
     last_note_active: bool,
     ring_mod_post_phase: [f32; 2],
+    sample_rate: f32,
 }
 
 #[derive(Params)]
@@ -710,6 +711,7 @@ impl Default for SubSynth {
             last_note_phase_delta: 0.0,
             last_note_active: false,
             ring_mod_post_phase: [0.0; 2],
+            sample_rate: 44100.0,
         }
     }
 }
@@ -1987,11 +1989,12 @@ impl Plugin for SubSynth {
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        buffer_config: &BufferConfig,
         context: &mut impl InitContext<Self>,
     ) -> bool {
         // After `PEAK_METER_DECAY_MS` milliseconds of pure silence, the peak meter's value should
         // have dropped by 12 dB
+        self.sample_rate = buffer_config.sample_rate;
         self.refresh_custom_wavetable();
         context.set_latency_samples(self.spectral_main.latency_samples());
         true
@@ -2979,7 +2982,7 @@ impl Plugin for SubSynth {
                         let modulated_resonance = modulated_resonance.max(0.0).min(1.0);
                         
                         // Apply filters using stored filter instances
-                        let filtered_sample = match voice.filter.unwrap() {
+                        let filtered_sample = match voice.filter.unwrap_or(FilterType::None) {
                             FilterType::None => pre_filter_mix,
                             FilterType::Lowpass => {
                                 voice.lowpass_filter.set_cutoff(modulated_cutoff);
@@ -3058,14 +3061,14 @@ impl Plugin for SubSynth {
                                 voice.bitcrush_lp_filter.process(pre_filter_mix)
                             }
                         };
-                        let mut filtered_sample = if matches!(voice.filter.unwrap(), FilterType::None) {
+                        let mut filtered_sample = if matches!(voice.filter.unwrap_or(FilterType::None), FilterType::None) {
                             filtered_sample
                         } else {
                             filter::tame_resonance(filtered_sample, modulated_resonance)
                         };
 
                         if filter_tight_enable {
-                            match voice.filter.unwrap() {
+                            match voice.filter.unwrap_or(FilterType::None) {
                                 FilterType::Lowpass
                                 | FilterType::DiodeLadderLp
                                 | FilterType::BitcrushLp => {
@@ -3692,10 +3695,10 @@ impl SubSynth {
             let oldest_voice = self
                 .voices
                 .iter_mut()
-                .min_by_key(|voice| voice.as_ref().unwrap().internal_voice_id)
+                .min_by_key(|voice| voice.as_ref().map(|v| v.internal_voice_id).unwrap_or(u64::MAX))
                 .unwrap();
             let oldest_voice = oldest_voice.as_mut().unwrap();
-    
+
             if oldest_voice.amp_envelope.get_state() == ADSREnvelopeState::Idle ||
                 oldest_voice.amp_envelope.get_state() == ADSREnvelopeState::Release
             {
@@ -3806,7 +3809,7 @@ impl SubSynth {
             Self::compute_fallback_voice_id(
                 note,
                 channel,
-                self.next_voice_index.try_into().unwrap(),
+                self.next_voice_index as i32,
             )
         });
 
@@ -3833,7 +3836,7 @@ impl SubSynth {
                 self.params.fm_env_decay2_level.value(),
                 self.params.fm_env_sustain_level.value(),
                 self.params.fm_env_release_ms.value(),
-                44100.0,
+                self.sample_rate,
                 1.0,
                 0.0,
             ),
@@ -3845,25 +3848,25 @@ impl SubSynth {
                 self.params.dist_env_decay2_level.value(),
                 self.params.dist_env_sustain_level.value(),
                 self.params.dist_env_release_ms.value(),
-                44100.0,
+                self.sample_rate,
                 1.0,
                 0.0,
             ),
             filter: Some(self.params.filter_type.value()),
-            lowpass_filter: filter::LowpassFilter::new(1000.0, 0.5, 192000.0),
-            highpass_filter: filter::HighpassFilter::new(1000.0, 0.5, 192000.0),
-            bandpass_filter: filter::BandpassFilter::new(1000.0, 0.5, 192000.0),
-            notch_filter: filter::NotchFilter::new(1000.0, 1.0, 192000.0),
-            statevariable_filter: filter::StatevariableFilter::new(1000.0, 0.5, 192000.0),
-            comb_filter: filter::CombFilter::new(192000.0),
-            rainbow_comb_filter: filter::RainbowCombFilter::new(192000.0),
-            diode_ladder_lp_filter: filter::DiodeLadderFilter::new_lowpass(192000.0),
-            diode_ladder_hp_filter: filter::DiodeLadderFilter::new_highpass(192000.0),
-            ms20_filter: filter::Ms20Filter::new(192000.0),
-            formant_morph_filter: filter::FormantMorphFilter::new(192000.0),
-            phaser_filter: filter::PhaserFilter::new(192000.0),
-            comb_allpass_filter: filter::CombAllpassFilter::new(192000.0),
-            bitcrush_lp_filter: filter::BitcrushLpFilter::new(192000.0),
+            lowpass_filter: filter::LowpassFilter::new(1000.0, 0.5, self.sample_rate),
+            highpass_filter: filter::HighpassFilter::new(1000.0, 0.5, self.sample_rate),
+            bandpass_filter: filter::BandpassFilter::new(1000.0, 0.5, self.sample_rate),
+            notch_filter: filter::NotchFilter::new(1000.0, 1.0, self.sample_rate),
+            statevariable_filter: filter::StatevariableFilter::new(1000.0, 0.5, self.sample_rate),
+            comb_filter: filter::CombFilter::new(self.sample_rate),
+            rainbow_comb_filter: filter::RainbowCombFilter::new(self.sample_rate),
+            diode_ladder_lp_filter: filter::DiodeLadderFilter::new_lowpass(self.sample_rate),
+            diode_ladder_hp_filter: filter::DiodeLadderFilter::new_highpass(self.sample_rate),
+            ms20_filter: filter::Ms20Filter::new(self.sample_rate),
+            formant_morph_filter: filter::FormantMorphFilter::new(self.sample_rate),
+            phaser_filter: filter::PhaserFilter::new(self.sample_rate),
+            comb_allpass_filter: filter::CombAllpassFilter::new(self.sample_rate),
+            bitcrush_lp_filter: filter::BitcrushLpFilter::new(self.sample_rate),
             pan,
             pressure,
             brightness,
@@ -3950,6 +3953,7 @@ impl SubSynth {
         vibrato_modulator: Option<&Modulator>,
         tremolo_modulator: Option<&Modulator>,
     ) {
+        let (default_amp_env, default_cut_env, default_res_env) = self.construct_envelopes(self.sample_rate, 1.0);
         let voice = self.find_or_create_voice(
             voice_id,
             channel,
@@ -3960,11 +3964,11 @@ impl SubSynth {
             expression,
             tuning,
             vibrato,
-            amp_envelope.cloned().unwrap(),
-            filter_cut_envelope.cloned().unwrap(),
-            filter_res_envelope.cloned().unwrap(),
-            vibrato_modulator.cloned().unwrap(),
-            tremolo_modulator.cloned().unwrap(),
+            amp_envelope.cloned().unwrap_or(default_amp_env),
+            filter_cut_envelope.cloned().unwrap_or(default_cut_env),
+            filter_res_envelope.cloned().unwrap_or(default_res_env),
+            vibrato_modulator.cloned().unwrap_or_default(),
+            tremolo_modulator.cloned().unwrap_or_default(),
         );
         voice.velocity = gain;
         voice.velocity_sqrt = gain.sqrt();
