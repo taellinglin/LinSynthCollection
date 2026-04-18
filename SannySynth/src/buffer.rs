@@ -13,8 +13,6 @@ pub use samples::{ChannelSamples, ChannelSamplesIter, SamplesIter};
 /// and efficiently iterate over the samples, or you can do your own thing using the raw audio
 /// buffers.
 ///
-/// TODO: This lifetime makes zero sense because you're going to need unsafe lifetime casts to use
-///       this either way. Maybe just get rid of it in favor for raw pointers.
 #[derive(Default)]
 pub struct Buffer<'a> {
     /// The number of samples contained within `output_slices`. This needs to be stored separately
