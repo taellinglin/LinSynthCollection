@@ -207,6 +207,28 @@ pub struct DelayBankParams {
     bank6_pan: FloatParam,
 }
 
+pub(crate) struct BankBlockParams {
+    pub(crate) enabled: bool,
+    pub(crate) sync: bool,
+    pub(crate) note: DelayNote,
+    pub(crate) time_ms: f32,
+    pub(crate) feedback: f32,
+    pub(crate) level: f32,
+    pub(crate) pan: f32,
+}
+
+pub(crate) struct BlockParams {
+    pub(crate) mix: f32,
+    pub(crate) input_gain: f32,
+    pub(crate) output_gain: f32,
+    pub(crate) hp_cut: f32,
+    pub(crate) lp_cut: f32,
+    pub(crate) crush_bits: u32,
+    pub(crate) crush_rate: f32,
+    pub(crate) crush_mix: f32,
+    pub(crate) banks: [BankBlockParams; NUM_BANKS],
+}
+
 impl Default for DelayBankParams {
     fn default() -> Self {
         Self {
@@ -622,45 +644,100 @@ impl Plugin for DelayBank {
             self.current_preset = preset;
         }
 
-        let mix = self.params.mix.value().clamp(0.0, 1.0);
-        let input_gain = db_to_gain(self.params.input_trim.value());
-        let output_gain = db_to_gain(self.params.output_trim.value());
+        let block_params = BlockParams {
+            mix: self.params.mix.value(),
+            input_gain: db_to_gain(self.params.input_trim.value()),
+            output_gain: db_to_gain(self.params.output_trim.value()),
+            hp_cut: self.params.hp_cut.value(),
+            lp_cut: self.params.lp_cut.value(),
+            crush_bits: self.params.crush_depth.value() as u32,
+            crush_rate: self.params.crush_rate.value(),
+            crush_mix: self.params.crush_mix.value(),
+            banks: [
+                BankBlockParams {
+                    enabled: self.params.bank1_enable.value(),
+                    sync: self.params.bank1_sync.value(),
+                    note: self.params.bank1_time_note.value(),
+                    time_ms: self.params.bank1_time_ms.value(),
+                    feedback: self.params.bank1_feedback.value(),
+                    level: self.params.bank1_level.value(),
+                    pan: self.params.bank1_pan.value(),
+                },
+                BankBlockParams {
+                    enabled: self.params.bank2_enable.value(),
+                    sync: self.params.bank2_sync.value(),
+                    note: self.params.bank2_time_note.value(),
+                    time_ms: self.params.bank2_time_ms.value(),
+                    feedback: self.params.bank2_feedback.value(),
+                    level: self.params.bank2_level.value(),
+                    pan: self.params.bank2_pan.value(),
+                },
+                BankBlockParams {
+                    enabled: self.params.bank3_enable.value(),
+                    sync: self.params.bank3_sync.value(),
+                    note: self.params.bank3_time_note.value(),
+                    time_ms: self.params.bank3_time_ms.value(),
+                    feedback: self.params.bank3_feedback.value(),
+                    level: self.params.bank3_level.value(),
+                    pan: self.params.bank3_pan.value(),
+                },
+                BankBlockParams {
+                    enabled: self.params.bank4_enable.value(),
+                    sync: self.params.bank4_sync.value(),
+                    note: self.params.bank4_time_note.value(),
+                    time_ms: self.params.bank4_time_ms.value(),
+                    feedback: self.params.bank4_feedback.value(),
+                    level: self.params.bank4_level.value(),
+                    pan: self.params.bank4_pan.value(),
+                },
+                BankBlockParams {
+                    enabled: self.params.bank5_enable.value(),
+                    sync: self.params.bank5_sync.value(),
+                    note: self.params.bank5_time_note.value(),
+                    time_ms: self.params.bank5_time_ms.value(),
+                    feedback: self.params.bank5_feedback.value(),
+                    level: self.params.bank5_level.value(),
+                    pan: self.params.bank5_pan.value(),
+                },
+                BankBlockParams {
+                    enabled: self.params.bank6_enable.value(),
+                    sync: self.params.bank6_sync.value(),
+                    note: self.params.bank6_time_note.value(),
+                    time_ms: self.params.bank6_time_ms.value(),
+                    feedback: self.params.bank6_feedback.value(),
+                    level: self.params.bank6_level.value(),
+                    pan: self.params.bank6_pan.value(),
+                },
+            ],
+        };
 
-        let hp_cut = self.params.hp_cut.value();
-        let lp_cut = self.params.lp_cut.value();
-        self.hp_l.set_cutoff(hp_cut, self.sample_rate);
-        self.hp_r.set_cutoff(hp_cut, self.sample_rate);
-        self.lp_l.set_cutoff(lp_cut, self.sample_rate);
-        self.lp_r.set_cutoff(lp_cut, self.sample_rate);
-
-        let crush_bits = self.params.crush_depth.value() as u32;
-        let crush_rate = self.params.crush_rate.value();
-        let crush_mix = self.params.crush_mix.value().clamp(0.0, 1.0);
+        self.hp_l.set_cutoff(block_params.hp_cut, self.sample_rate);
+        self.hp_r.set_cutoff(block_params.hp_cut, self.sample_rate);
+        self.lp_l.set_cutoff(block_params.lp_cut, self.sample_rate);
+        self.lp_r.set_cutoff(block_params.lp_cut, self.sample_rate);
 
         let tempo = context.transport().tempo.map(|tempo| tempo as f32);
-
         let num_samples = buffer.samples();
         let output = buffer.as_slice();
         if output.is_empty() {
             return ProcessStatus::Normal;
         }
 
-        let (left, right) = if output.len() >= 2 {
-            let (left, rest) = output.split_at_mut(1);
-            (&mut left[0], Some(&mut rest[0]))
-        } else {
-            (&mut output[0], None)
-        };
+        const MAX_BLOCK_SIZE: usize = 64;
+        let mut block_start: usize = 0;
+        let has_stereo = output.len() >= 2;
 
-        if let Some(right) = right {
-            for i in 0..num_samples {
-                let in_l = left[i] * input_gain;
-                let in_r = right[i] * input_gain;
+        while block_start < num_samples {
+            let block_end = (block_start + MAX_BLOCK_SIZE).min(num_samples);
+
+            for i in block_start..block_end {
+                let in_l = output[0][i] * block_params.input_gain;
+                let in_r = if has_stereo { output[1][i] * block_params.input_gain } else { in_l };
                 let input_mono = 0.5 * (in_l + in_r);
 
                 let (mut wet_l, mut wet_r) = process_banks(
                     &mut self.banks,
-                    &self.params,
+                    &block_params,
                     input_mono,
                     self.sample_rate,
                     tempo,
@@ -669,20 +746,29 @@ impl Plugin for DelayBank {
                 wet_l = self.lp_l.process(self.hp_l.process(wet_l));
                 wet_r = self.lp_r.process(self.hp_r.process(wet_r));
 
-                let crushed_l = self
-                    .crush_l
-                    .process(wet_l, self.sample_rate, crush_rate, crush_bits);
-                let crushed_r = self
-                    .crush_r
-                    .process(wet_r, self.sample_rate, crush_rate, crush_bits);
+                let crushed_l = self.crush_l.process(
+                    wet_l,
+                    self.sample_rate,
+                    block_params.crush_rate,
+                    block_params.crush_bits,
+                );
+                let crushed_r = self.crush_r.process(
+                    wet_r,
+                    self.sample_rate,
+                    block_params.crush_rate,
+                    block_params.crush_bits,
+                );
 
-                wet_l = lerp(wet_l, crushed_l, crush_mix);
-                wet_r = lerp(wet_r, crushed_r, crush_mix);
+                wet_l = lerp(wet_l, crushed_l, block_params.crush_mix);
+                wet_r = lerp(wet_r, crushed_r, block_params.crush_mix);
 
-                let out_l = lerp(in_l, wet_l, mix) * output_gain;
-                let out_r = lerp(in_r, wet_r, mix) * output_gain;
-                left[i] = out_l;
-                right[i] = out_r;
+                let out_l = lerp(in_l, wet_l, block_params.mix) * block_params.output_gain;
+                let out_r = lerp(in_r, wet_r, block_params.mix) * block_params.output_gain;
+
+                output[0][i] = out_l;
+                if has_stereo {
+                    output[1][i] = out_r;
+                }
 
                 self.scope_counter += 1;
                 if self.scope_counter >= self.scope_decim {
@@ -690,41 +776,8 @@ impl Plugin for DelayBank {
                     self.scope.push(0.5 * (out_l + out_r));
                 }
             }
-        } else {
-            for i in 0..num_samples {
-                let in_l = left[i] * input_gain;
-                let input_mono = in_l;
 
-                let (mut wet_l, mut wet_r) = process_banks(
-                    &mut self.banks,
-                    &self.params,
-                    input_mono,
-                    self.sample_rate,
-                    tempo,
-                );
-
-                wet_l = self.lp_l.process(self.hp_l.process(wet_l));
-                wet_r = self.lp_r.process(self.hp_r.process(wet_r));
-
-                let crushed_l = self
-                    .crush_l
-                    .process(wet_l, self.sample_rate, crush_rate, crush_bits);
-                let crushed_r = self
-                    .crush_r
-                    .process(wet_r, self.sample_rate, crush_rate, crush_bits);
-
-                wet_l = lerp(wet_l, crushed_l, crush_mix);
-                wet_r = lerp(wet_r, crushed_r, crush_mix);
-
-                let out_l = lerp(in_l, 0.5 * (wet_l + wet_r), mix) * output_gain;
-                left[i] = out_l;
-
-                self.scope_counter += 1;
-                if self.scope_counter >= self.scope_decim {
-                    self.scope_counter = 0;
-                    self.scope.push(out_l);
-                }
-            }
+            block_start = block_end;
         }
 
         ProcessStatus::Normal
@@ -733,7 +786,7 @@ impl Plugin for DelayBank {
 
 fn process_banks(
     banks: &mut [DelayBankState; NUM_BANKS],
-    params: &DelayBankParams,
+    params: &BlockParams,
     input_mono: f32,
     sample_rate: f32,
     tempo: Option<f32>,
@@ -742,62 +795,10 @@ fn process_banks(
     let mut wet_r = 0.0;
 
     for bank_idx in 0..NUM_BANKS {
-        let (enabled, sync, note, time_ms, feedback, level, pan) = match bank_idx {
-            0 => (
-                params.bank1_enable.value(),
-                params.bank1_sync.value(),
-                params.bank1_time_note.value(),
-                params.bank1_time_ms.value(),
-                params.bank1_feedback.value(),
-                params.bank1_level.value(),
-                params.bank1_pan.value(),
-            ),
-            1 => (
-                params.bank2_enable.value(),
-                params.bank2_sync.value(),
-                params.bank2_time_note.value(),
-                params.bank2_time_ms.value(),
-                params.bank2_feedback.value(),
-                params.bank2_level.value(),
-                params.bank2_pan.value(),
-            ),
-            2 => (
-                params.bank3_enable.value(),
-                params.bank3_sync.value(),
-                params.bank3_time_note.value(),
-                params.bank3_time_ms.value(),
-                params.bank3_feedback.value(),
-                params.bank3_level.value(),
-                params.bank3_pan.value(),
-            ),
-            3 => (
-                params.bank4_enable.value(),
-                params.bank4_sync.value(),
-                params.bank4_time_note.value(),
-                params.bank4_time_ms.value(),
-                params.bank4_feedback.value(),
-                params.bank4_level.value(),
-                params.bank4_pan.value(),
-            ),
-            4 => (
-                params.bank5_enable.value(),
-                params.bank5_sync.value(),
-                params.bank5_time_note.value(),
-                params.bank5_time_ms.value(),
-                params.bank5_feedback.value(),
-                params.bank5_level.value(),
-                params.bank5_pan.value(),
-            ),
-            _ => (
-                params.bank6_enable.value(),
-                params.bank6_sync.value(),
-                params.bank6_time_note.value(),
-                params.bank6_time_ms.value(),
-                params.bank6_feedback.value(),
-                params.bank6_level.value(),
-                params.bank6_pan.value(),
-            ),
-        };
+        let b = &params.banks[bank_idx];
+        let (enabled, sync, note, time_ms, feedback, level, pan) = (
+            b.enabled, b.sync, b.note, b.time_ms, b.feedback, b.level, b.pan
+        );
 
         if !enabled {
             continue;

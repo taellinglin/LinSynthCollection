@@ -1,4 +1,4 @@
-use crate::drum_params::{DrumSlotParams, DRUM_OUTPUT_PAIRS, DRUM_SLOTS};
+use crate::drum_synth::params::{DrumSlotParams, DRUM_OUTPUT_PAIRS, DRUM_SLOTS};
 use crate::sample::{load_sample_from_file, SampleBuffer};
 use crate::util;
 use std::sync::{Arc, RwLock};

@@ -167,6 +167,12 @@ impl ADSREnvelope {
         self.hold = hold;
     }
 
+    pub fn next_sample(&mut self) -> f32 {
+        let val = self.get_value();
+        self.advance();
+        val
+    }
+
     pub fn set_tension(&mut self, tension: f32) {
         self.tension = tension.clamp(-1.0, 1.0);
     }

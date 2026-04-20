@@ -1,5 +1,5 @@
 use crate::filter::{self, BandpassFilter, BitcrushLpFilter, CombAllpassFilter, CombFilter, DiodeLadderFilter, Filter, FilterType, FormantMorphFilter, HighpassFilter, Ms20Filter, LowpassFilter, NotchFilter, PhaserFilter, RainbowCombFilter, StatevariableFilter};
-use crate::FilterRouting;
+use crate::common::FilterRouting;
 
 struct FilterBank {
     lowpass: LowpassFilter,

@@ -92,5 +92,7 @@ impl Modulator {
     
         modulation * intensity
     }
-    
+    pub fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        self.get_modulation(sample_rate)
+    }
 }

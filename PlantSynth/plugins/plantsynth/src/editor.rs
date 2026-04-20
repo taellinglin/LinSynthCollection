@@ -28,18 +28,11 @@ use crate::{
     util,
     waveform::load_wavetable_from_file,
     sample::load_sample_from_file,
-    FilterType,
-    GlideMode,
-    ModSource,
-    ModTarget,
-    OscRouting,
-    OscillatorShape,
-    SubSynthParams,
-    Waveform,
-    DrumSynthParams,
+    common::*,
+    sub_synth::params::SubSynthParams,
+    drum_synth::params::{DrumSynthParams, DRUM_SLOTS},
 };
 use crate::sample::SampleBuffer;
-use crate::drum_params::DRUM_SLOTS;
 
 // zCool font constant
 const ZCOOL_XIAOWEI: &str = "ZCOOL XiaoWei";

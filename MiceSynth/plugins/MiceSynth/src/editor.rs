@@ -20,7 +20,11 @@ const CF_UNICODETEXT: u32 = 13;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 
-use crate::{util, waveform::load_wavetable_from_file, FilterType, ModSource, ModTarget, OscRouting, OscillatorShape, SubSynthParams, UnisonVoices, Waveform};
+use nih_plug::prelude::util;
+use crate::params::{FilterRouting, ModSource, ModTarget, OscRouting, SubSynthParams, UnisonVoices};
+use crate::modulator::OscillatorShape;
+use crate::waveform::{Waveform, load_wavetable_from_file};
+use crate::filter::FilterType;
 
 // zCool font constant
 const ZCOOL_XIAOWEI: &str = "ZCOOL XiaoWei";

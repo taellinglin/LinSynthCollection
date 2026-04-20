@@ -25,6 +25,32 @@ enum DpcmMode {
     OneBit,
 }
 
+struct BlockParams {
+    mix: f32,
+    input_gain: f32,
+    output_gain: f32,
+    bit_depth: u32,
+    bit_rate: f32,
+    bit_jitter: f32,
+    bit_pregain: f32,
+    mono: bool,
+    harm_a: i32,
+    harm_b: i32,
+    harm_detune: f32,
+    harm_mix: f32,
+    psg_cutoff: f32,
+    psg_res: f32,
+    psg_steps: i32,
+    gate_rate: f32,
+    gate_pattern: u16,
+    gate_depth: f32,
+    dpcm_step: f32,
+    dpcm_mode: DpcmMode,
+    pwm_duty: f32,
+    pwm_depth: f32,
+    pwm_rate: f32,
+}
+
 #[derive(Params)]
 struct CartStackParams {
     #[id = "mode"]
@@ -223,10 +249,196 @@ impl BitEngineState {
     }
 }
 
+struct HarmonizerState {
+    buffer_l: Vec<f32>,
+    buffer_r: Vec<f32>,
+    write_pos: usize,
+    read_pos_a: f32,
+    read_pos_b: f32,
+}
+
+impl HarmonizerState {
+    fn new(sample_rate: f32) -> Self {
+        let size = (sample_rate * 0.1) as usize; // 100ms buffer
+        Self {
+            buffer_l: vec![0.0; size],
+            buffer_r: vec![0.0; size],
+            write_pos: 0,
+            read_pos_a: 0.0,
+            read_pos_b: 0.0,
+        }
+    }
+
+    fn process(
+        &mut self,
+        input_l: f32,
+        input_r: f32,
+        interval_a: i32,
+        interval_b: i32,
+        detune_cents: f32,
+        mix: f32,
+    ) -> (f32, f32) {
+        if mix <= 0.0 {
+            return (input_l, input_r);
+        }
+
+        let size = self.buffer_l.len();
+        self.buffer_l[self.write_pos] = input_l;
+        self.buffer_r[self.write_pos] = input_r;
+
+        let ratio_a = (2.0_f32).powf((interval_a as f32 + detune_cents / 100.0) / 12.0);
+        let ratio_b = (2.0_f32).powf((interval_b as f32 - detune_cents / 100.0) / 12.0);
+
+        let read_idx_a = self.read_pos_a as usize % size;
+        let read_idx_b = self.read_pos_b as usize % size;
+
+        let harm_l = (self.buffer_l[read_idx_a] + self.buffer_l[read_idx_b]) * 0.5;
+        let harm_r = (self.buffer_r[read_idx_a] + self.buffer_r[read_idx_b]) * 0.5;
+
+        self.write_pos = (self.write_pos + 1) % size;
+        self.read_pos_a += ratio_a;
+        self.read_pos_b += ratio_b;
+
+        (
+            input_l * (1.0 - mix) + harm_l * mix,
+            input_r * (1.0 - mix) + harm_r * mix,
+        )
+    }
+}
+
+struct PsgFilterState {
+    lp_l: f32,
+    lp_r: f32,
+}
+
+impl PsgFilterState {
+    fn new() -> Self {
+        Self { lp_l: 0.0, lp_r: 0.0 }
+    }
+
+    fn process(
+        &mut self,
+        input_l: f32,
+        input_r: f32,
+        cutoff: f32,
+        res: f32,
+        steps: i32,
+        sample_rate: f32,
+    ) -> (f32, f32) {
+        let f = (2.0 * std::f32::consts::PI * cutoff / sample_rate).min(0.99);
+        let q = 1.0 - res.clamp(0.0, 0.9);
+
+        // Simple one-pole with "stepping"
+        let steps = steps.max(1) as f32;
+        let quantize = |x: f32| (x * steps).round() / steps;
+
+        self.lp_l += f * (input_l - self.lp_l) * q;
+        self.lp_r += f * (input_r - self.lp_r) * q;
+
+        (quantize(self.lp_l), quantize(self.lp_r))
+    }
+}
+
+struct GateState {
+    phase: f32,
+}
+
+impl GateState {
+    fn new() -> Self {
+        Self { phase: 0.0 }
+    }
+
+    fn process(
+        &mut self,
+        input_l: f32,
+        input_r: f32,
+        rate: f32,
+        pattern: u16,
+        depth: f32,
+        sample_rate: f32,
+    ) -> (f32, f32) {
+        let step_size = rate / sample_rate;
+        self.phase = (self.phase + step_size).fract();
+        
+        let step = (self.phase * 16.0) as u32;
+        let is_on = (pattern >> (15 - step)) & 1 == 1;
+        
+        let gain = if is_on { 1.0 } else { 1.0 - depth };
+        (input_l * gain, input_r * gain)
+    }
+}
+
+struct DpcmState {
+    acc_l: f32,
+    acc_r: f32,
+}
+
+impl DpcmState {
+    fn new() -> Self {
+        Self { acc_l: 0.0, acc_r: 0.0 }
+    }
+
+    fn process(
+        &mut self,
+        input_l: f32,
+        input_r: f32,
+        step: f32,
+        _mode: DpcmMode,
+    ) -> (f32, f32) {
+        let process_sample = |input: f32, acc: &mut f32| -> f32 {
+            let diff = input - *acc;
+            if diff > 0.0 {
+                *acc += step * 0.01;
+            } else {
+                *acc -= step * 0.01;
+            }
+            *acc = acc.clamp(-1.0, 1.0);
+            *acc
+        };
+
+        (
+            process_sample(input_l, &mut self.acc_l),
+            process_sample(input_r, &mut self.acc_r),
+        )
+    }
+}
+
+struct PwmState {
+    phase: f32,
+}
+
+impl PwmState {
+    fn new() -> Self {
+        Self { phase: 0.0 }
+    }
+
+    fn process(
+        &mut self,
+        input: f32,
+        duty: f32,
+        depth: f32,
+        rate: f32,
+        sample_rate: f32,
+    ) -> f32 {
+        let step = rate / sample_rate;
+        self.phase = (self.phase + step).fract();
+        
+        let mod_duty = duty + (self.phase * 2.0 * std::f32::consts::PI).sin() * depth * 0.4;
+        let threshold = mod_duty * 2.0 - 1.0;
+        
+        if input > threshold { 1.0 } else { -1.0 }
+    }
+}
+
 struct CartStack {
     params: Arc<CartStackParams>,
     sample_rate: f32,
     bit_state: BitEngineState,
+    harm_state: HarmonizerState,
+    psg_state: PsgFilterState,
+    gate_state: GateState,
+    dpcm_state: DpcmState,
+    pwm_state: PwmState,
 }
 
 impl Default for CartStack {
@@ -235,6 +447,11 @@ impl Default for CartStack {
             params: Arc::new(CartStackParams::default()),
             sample_rate: 44100.0,
             bit_state: BitEngineState::new(),
+            harm_state: HarmonizerState::new(44100.0),
+            psg_state: PsgFilterState::new(),
+            gate_state: GateState::new(),
+            dpcm_state: DpcmState::new(),
+            pwm_state: PwmState::new(),
         }
     }
 }
@@ -274,6 +491,7 @@ impl Plugin for CartStack {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
+        self.harm_state = HarmonizerState::new(self.sample_rate);
         true
     }
 
@@ -287,72 +505,138 @@ impl Plugin for CartStack {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let mix = self.params.mix.value().clamp(0.0, 1.0);
-        let input_trim_db = self.params.input_trim.value();
-        let output_trim_db = self.params.output_trim.value();
-        let input_gain = db_to_gain(input_trim_db);
-        let output_gain = db_to_gain(output_trim_db);
-
-        let bit_depth = self.params.bit_depth.value() as u32;
-        let bit_rate = self.params.bit_rate.value();
-        let bit_jitter = self.params.bit_jitter.value();
-        let bit_pregain = db_to_gain(self.params.bit_pregain.value());
-        let mono = self.params.mono.value();
-
         let num_samples = buffer.samples();
         let output = buffer.as_slice();
         if output.is_empty() {
             return ProcessStatus::Normal;
         }
 
-        if output.len() >= 2 {
-            let (left, rest) = output.split_at_mut(1);
-            let left = &mut left[0];
-            let right = &mut rest[0];
+        let block_params = BlockParams {
+            mix: self.params.mix.value(),
+            input_gain: db_to_gain(self.params.input_trim.value()),
+            output_gain: db_to_gain(self.params.output_trim.value()),
+            bit_depth: self.params.bit_depth.value() as u32,
+            bit_rate: self.params.bit_rate.value(),
+            bit_jitter: self.params.bit_jitter.value(),
+            bit_pregain: db_to_gain(self.params.bit_pregain.value()),
+            mono: self.params.mono.value(),
+            harm_a: self.params.harm_interval_a.value(),
+            harm_b: self.params.harm_interval_b.value(),
+            harm_detune: self.params.harm_detune.value(),
+            harm_mix: self.params.harm_mix.value(),
+            psg_cutoff: self.params.psg_cutoff.value(),
+            psg_res: self.params.psg_res.value(),
+            psg_steps: self.params.psg_steps.value(),
+            gate_rate: self.params.gate_rate.value(),
+            gate_pattern: self.params.gate_pattern.value() as u16,
+            gate_depth: self.params.gate_depth.value(),
+            dpcm_step: self.params.dpcm_step.value(),
+            dpcm_mode: self.params.dpcm_mode.value(),
+            pwm_duty: self.params.pwm_duty.value(),
+            pwm_depth: self.params.pwm_depth.value(),
+            pwm_rate: self.params.pwm_rate.value(),
+        };
 
-            for i in 0..num_samples {
-                let mut in_l = left[i] * input_gain;
-                let mut in_r = right[i] * input_gain;
-                if mono {
+        const MAX_BLOCK_SIZE: usize = 64;
+        let mut block_start: usize = 0;
+        let has_stereo = output.len() >= 2;
+
+        while block_start < num_samples {
+            let block_end = (block_start + MAX_BLOCK_SIZE).min(num_samples);
+
+            for i in block_start..block_end {
+                let mut in_l = output[0][i] * block_params.input_gain;
+                let mut in_r = if has_stereo { output[1][i] * block_params.input_gain } else { in_l };
+
+                if block_params.mono {
                     let mid = 0.5 * (in_l + in_r);
                     in_l = mid;
                     in_r = mid;
                 }
 
+                // Harmonizer
+                let (mut h_l, mut h_r) = self.harm_state.process(
+                    in_l,
+                    in_r,
+                    block_params.harm_a,
+                    block_params.harm_b,
+                    block_params.harm_detune,
+                    block_params.harm_mix,
+                );
+
+                // Bit Crusher
                 let (held_l, held_r) = self.bit_state.process(
-                    in_l * bit_pregain,
-                    in_r * bit_pregain,
+                    h_l * block_params.bit_pregain,
+                    h_r * block_params.bit_pregain,
                     self.sample_rate,
-                    bit_rate,
-                    bit_jitter,
+                    block_params.bit_rate,
+                    block_params.bit_jitter,
                 );
 
-                let crushed_l = quantize(held_l, bit_depth);
-                let crushed_r = quantize(held_r, bit_depth);
+                let mut out_l = quantize(held_l, block_params.bit_depth);
+                let mut out_r = quantize(held_r, block_params.bit_depth);
 
-                let out_l = lerp(in_l, crushed_l, mix) * output_gain;
-                let out_r = lerp(in_r, crushed_r, mix) * output_gain;
+                // PWM Shaper
+                if block_params.pwm_depth > 0.0 {
+                    out_l = self.pwm_state.process(
+                        out_l,
+                        block_params.pwm_duty,
+                        block_params.pwm_depth,
+                        block_params.pwm_rate,
+                        self.sample_rate,
+                    );
+                    out_r = self.pwm_state.process(
+                        out_r,
+                        block_params.pwm_duty,
+                        block_params.pwm_depth,
+                        block_params.pwm_rate,
+                        self.sample_rate,
+                    );
+                }
 
-                left[i] = out_l;
-                right[i] = out_r;
-            }
-        } else {
-            let left = &mut output[0];
-            for i in 0..num_samples {
-                let in_l = left[i] * input_gain;
+                // DPCM
+                if block_params.dpcm_step > 0.0 {
+                    let (d_l, d_r) =
+                        self.dpcm_state
+                            .process(out_l, out_r, block_params.dpcm_step, block_params.dpcm_mode);
+                    out_l = d_l;
+                    out_r = d_r;
+                }
 
-                let (held_l, _) = self.bit_state.process(
-                    in_l * bit_pregain,
-                    in_l * bit_pregain,
+                // PSG Filter
+                let (f_l, f_r) = self.psg_state.process(
+                    out_l,
+                    out_r,
+                    block_params.psg_cutoff,
+                    block_params.psg_res,
+                    block_params.psg_steps,
                     self.sample_rate,
-                    bit_rate,
-                    bit_jitter,
                 );
+                out_l = f_l;
+                out_r = f_r;
 
-                let crushed_l = quantize(held_l, bit_depth);
-                let out_l = lerp(in_l, crushed_l, mix) * output_gain;
-                left[i] = out_l;
+                // Gate
+                let (g_l, g_r) = self.gate_state.process(
+                    out_l,
+                    out_r,
+                    block_params.gate_rate,
+                    block_params.gate_pattern,
+                    block_params.gate_depth,
+                    self.sample_rate,
+                );
+                out_l = g_l;
+                out_r = g_r;
+
+                let final_l = lerp(in_l, out_l, block_params.mix) * block_params.output_gain;
+                let final_r = lerp(in_r, out_r, block_params.mix) * block_params.output_gain;
+
+                output[0][i] = final_l;
+                if has_stereo {
+                    output[1][i] = final_r;
+                }
             }
+
+            block_start = block_end;
         }
 
         ProcessStatus::Normal
