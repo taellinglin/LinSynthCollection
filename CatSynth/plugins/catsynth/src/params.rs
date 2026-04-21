@@ -43,6 +43,8 @@ pub(crate) enum ModTarget {
     FmFeedback,
 }
 
+pub(crate) const GAIN_POLY_MOD_ID: u32 = 0;
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Enum, Sequence)]
 pub(crate) enum FmSource {
     Classic,
@@ -75,7 +77,7 @@ pub(crate) enum UnisonVoices {
 #[derive(Params)]
 pub(crate) struct SeqStepParams {
     #[id = "val"]
-    value: FloatParam,
+    pub(crate) value: FloatParam,
 }
 
 impl Default for SeqStepParams {
@@ -94,7 +96,7 @@ impl Default for SeqStepParams {
 #[derive(Params)]
 pub(crate) struct SeqLaneParams {
     #[nested(array)]
-    steps: [SeqStepParams; 32],
+    pub(crate) steps: [SeqStepParams; 32],
 }
 
 impl Default for SeqLaneParams {

@@ -19,14 +19,12 @@ mod midi_map;
 pub mod params;
 pub mod voice;
 
-use enum_iterator::Sequence;
-use nih_plug::params::enums::Enum;
-use nih_plug::params::enums::EnumParam;
 use nih_plug::prelude::*;
-use nih_plug_vizia::ViziaState;
+use crate::drum_params::DrumOrganicKitPreset;
+// use nih_plug_vizia::ViziaState;
 use rand::Rng;
 use rand_pcg::Pcg32;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use modulator::{Modulator, OscillatorShape};
 use chorus::Chorus;
@@ -102,8 +100,6 @@ impl Default for SubSynth {
         }
     }
 }
-
-const MAX_BLOCK_SIZE: usize = 64;
 
 struct BlockParams {
     gain: f32,
@@ -187,6 +183,58 @@ struct BlockParams {
     pan_lfo_intensity: f32,
     pan_lfo_attack: f32,
     pan_lfo_shape: OscillatorShape,
+    chorus_enable: bool,
+    chorus_rate: f32,
+    chorus_depth: f32,
+    chorus_mix: f32,
+    multi_filter_enable: bool,
+    multi_filter_routing: FilterRouting,
+    multi_filter_morph: f32,
+    multi_filter_parallel_ab: f32,
+    multi_filter_parallel_c: f32,
+    multi_filter_a_type: FilterType,
+    multi_filter_a_cut: f32,
+    multi_filter_a_res: f32,
+    multi_filter_a_amt: f32,
+    multi_filter_b_type: FilterType,
+    multi_filter_b_cut: f32,
+    multi_filter_b_res: f32,
+    multi_filter_b_amt: f32,
+    multi_filter_c_type: FilterType,
+    multi_filter_c_cut: f32,
+    multi_filter_c_res: f32,
+    multi_filter_c_amt: f32,
+    dist_enable: bool,
+    dist_drive: f32,
+    dist_tone: f32,
+    dist_magic: f32,
+    dist_mix: f32,
+    eq_enable: bool,
+    eq_low_gain: f32,
+    eq_mid_gain: f32,
+    eq_mid_freq: f32,
+    eq_mid_q: f32,
+    eq_high_gain: f32,
+    eq_mix: f32,
+    delay_enable: bool,
+    delay_time_ms: f32,
+    delay_feedback: f32,
+    delay_mix: f32,
+    reverb_enable: bool,
+    reverb_size: f32,
+    reverb_damp: f32,
+    reverb_diffusion: f32,
+    reverb_shimmer: f32,
+    reverb_mix: f32,
+    output_sat_enable: bool,
+    output_sat_type: OutputSaturationType,
+    output_sat_drive: f32,
+    output_sat_mix: f32,
+    limiter_enable: bool,
+    limiter_threshold: f32,
+    limiter_release: f32,
+    fm_env_amount: f32,
+    dist_env_amount: f32,
 }
 
 impl Plugin for SubSynth {
@@ -237,10 +285,1068 @@ impl Plugin for SubSynth {
         self.next_internal_voice_id = 0;
     }
 
+    fn process(
+        &mut self,
+        buffer: &mut Buffer,
+        _aux: &mut AuxiliaryBuffers,
+        context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        let num_samples = buffer.samples();
+        let sample_rate = context.transport().sample_rate;
+        let output = buffer.as_slice();
+        if output.len() < 2 {
+            for channel in output.iter_mut() {
+                channel.fill(0.0);
+            }
+            return ProcessStatus::Normal;
+        }
+
+        self.delay.set_sample_rate(sample_rate);
+        self.reverb.set_sample_rate(sample_rate);
+        self.multi_filter.set_sample_rate(sample_rate);
+        self.distortion.set_sample_rate(sample_rate);
+        self.eq.set_sample_rate(sample_rate);
+        self.output_saturation.set_sample_rate(sample_rate);
+        self.refresh_custom_wavetable();
+
+        let mut next_event = context.next_event();
+        let mut block_start: usize = 0;
+        let mut block_end: usize = MAX_BLOCK_SIZE.min(num_samples);
+        while block_start < num_samples {
+            let this_sample_internal_voice_id_start = self.next_internal_voice_id;
+            'events: loop {
+                match next_event {
+                    Some(event) if (event.timing() as usize) < block_end => {
+                        self.handle_event(context, event, this_sample_internal_voice_id_start, sample_rate);
+                        next_event = context.next_event();
+                    }
+                    Some(event) if (event.timing() as usize) < block_end => {
+                        block_end = event.timing() as usize;
+                        break 'events;
+                    }
+                    _ => break 'events,
+                }
+            }
+
+            output[0][block_start..block_end].fill(0.0);
+            output[1][block_start..block_end].fill(0.0);
+
+            let block_len = block_end - block_start;
+            let mut gain = [0.0; MAX_BLOCK_SIZE];
+            let mut voice_gain = [0.0; MAX_BLOCK_SIZE];
+            let mut seq_gate_values = [1.0; MAX_BLOCK_SIZE];
+            let mut seq_dist_values = [0.0; MAX_BLOCK_SIZE];
+            let mut dist_env_values = [0.0; MAX_BLOCK_SIZE];
+            self.params.gain.smoothed.next_block(&mut gain, block_len);
+
+            let block_params = BlockParams {
+                gain: self.params.gain.value(),
+                waveform: self.params.waveform.value(),
+                osc_routing: self.params.osc_routing.value(),
+                osc_blend: self.params.osc_blend.value(),
+                wavetable_position: self.params.wavetable_position.value(),
+                wavetable_distortion: self.params.wavetable_distortion.value(),
+                classic_drive: self.params.classic_drive.value(),
+                custom_wavetable_enable: self.params.custom_wavetable_enable.value(),
+                analog_enable: self.params.analog_enable.value(),
+                analog_drive: self.params.analog_drive.value(),
+                analog_noise: self.params.analog_noise.value(),
+                analog_drift: self.params.analog_drift.value(),
+                sub_level: self.params.sub_level.value(),
+                unison_voices: self.params.unison_voices.value(),
+                unison_detune: self.params.unison_detune.value(),
+                unison_spread: self.params.unison_spread.value(),
+                glide_mode: self.params.glide_mode.value(),
+                glide_time_ms: self.params.glide_time_ms.value(),
+                filter_type: self.params.filter_type.value(),
+                filter_cut: self.params.filter_cut.value(),
+                filter_res: self.params.filter_res.value(),
+                filter_amount: self.params.filter_amount.value(),
+                filter_cut_envelope_level: self.params.filter_cut_envelope_level.value(),
+                filter_res_envelope_level: self.params.filter_res_envelope_level.value(),
+                amp_envelope_level: self.params.amp_envelope_level.value(),
+                fm_enable: self.params.fm_enable.value(),
+                fm_source: self.params.fm_source.value(),
+                fm_target: self.params.fm_target.value(),
+                fm_amount: self.params.fm_amount.value(),
+                fm_ratio: self.params.fm_ratio.value(),
+                fm_feedback: self.params.fm_feedback.value(),
+                vibrato_intensity: self.params.vibrato_intensity.value(),
+                vibrato_rate: self.params.vibrato_rate.value(),
+                vibrato_attack: self.params.vibrato_attack.value(),
+                vibrato_shape: self.params.vibrato_shape.value(),
+                tremolo_intensity: self.params.tremolo_intensity.value(),
+                tremolo_rate: self.params.tremolo_rate.value(),
+                tremolo_attack: self.params.tremolo_attack.value(),
+                tremolo_shape: self.params.tremolo_shape.value(),
+                lfo1_rate: self.params.lfo1_rate.value(),
+                lfo1_attack: self.params.lfo1_attack.value(),
+                lfo1_shape: self.params.lfo1_shape.value(),
+                lfo2_rate: self.params.lfo2_rate.value(),
+                lfo2_attack: self.params.lfo2_attack.value(),
+                lfo2_shape: self.params.lfo2_shape.value(),
+                mod1_source: self.params.mod1_source.value(),
+                mod1_target: self.params.mod1_target.value(),
+                mod1_amount: self.params.mod1_amount.value(),
+                mod1_smooth_ms: self.params.mod1_smooth_ms.value(),
+                mod2_source: self.params.mod2_source.value(),
+                mod2_target: self.params.mod2_target.value(),
+                mod2_amount: self.params.mod2_amount.value(),
+                mod2_smooth_ms: self.params.mod2_smooth_ms.value(),
+                mod3_source: self.params.mod3_source.value(),
+                mod3_target: self.params.mod3_target.value(),
+                mod3_amount: self.params.mod3_amount.value(),
+                mod3_smooth_ms: self.params.mod3_smooth_ms.value(),
+                mod4_source: self.params.mod4_source.value(),
+                mod4_target: self.params.mod4_target.value(),
+                mod4_amount: self.params.mod4_amount.value(),
+                mod4_smooth_ms: self.params.mod4_smooth_ms.value(),
+                mod5_source: self.params.mod5_source.value(),
+                mod5_target: self.params.mod5_target.value(),
+                mod5_amount: self.params.mod5_amount.value(),
+                mod5_smooth_ms: self.params.mod5_smooth_ms.value(),
+                mod6_source: self.params.mod6_source.value(),
+                mod6_target: self.params.mod6_target.value(),
+                mod6_amount: self.params.mod6_amount.value(),
+                mod6_smooth_ms: self.params.mod6_smooth_ms.value(),
+                seq_enable: self.params.seq_enable.value(),
+                seq_rate: self.params.seq_rate.value(),
+                seq_gate_amount: self.params.seq_gate_amount.value(),
+                seq_cut_amount: self.params.seq_cut_amount.value(),
+                seq_res_amount: self.params.seq_res_amount.value(),
+                seq_wt_amount: self.params.seq_wt_amount.value(),
+                seq_dist_amount: self.params.seq_dist_amount.value(),
+                seq_fm_amount: self.params.seq_fm_amount.value(),
+                pan_lfo_rate: self.params.pan_lfo_rate.value(),
+                pan_lfo_intensity: self.params.pan_lfo_intensity.value(),
+                pan_lfo_attack: self.params.pan_lfo_attack.value(),
+                pan_lfo_shape: self.params.pan_lfo_shape.value(),
+                
+                chorus_enable: self.params.chorus_enable.value(),
+                chorus_rate: self.params.chorus_rate.value(),
+                chorus_depth: self.params.chorus_depth.value(),
+                chorus_mix: self.params.chorus_mix.value(),
+                multi_filter_enable: self.params.multi_filter_enable.value(),
+                multi_filter_routing: self.params.multi_filter_routing.value(),
+                multi_filter_morph: self.params.multi_filter_morph.value(),
+                multi_filter_parallel_ab: self.params.multi_filter_parallel_ab.value(),
+                multi_filter_parallel_c: self.params.multi_filter_parallel_c.value(),
+                multi_filter_a_type: self.params.multi_filter_a_type.value(),
+                multi_filter_a_cut: self.params.multi_filter_a_cut.value(),
+                multi_filter_a_res: self.params.multi_filter_a_res.value(),
+                multi_filter_a_amt: self.params.multi_filter_a_amt.value(),
+                multi_filter_b_type: self.params.multi_filter_b_type.value(),
+                multi_filter_b_cut: self.params.multi_filter_b_cut.value(),
+                multi_filter_b_res: self.params.multi_filter_b_res.value(),
+                multi_filter_b_amt: self.params.multi_filter_b_amt.value(),
+                multi_filter_c_type: self.params.multi_filter_c_type.value(),
+                multi_filter_c_cut: self.params.multi_filter_c_cut.value(),
+                multi_filter_c_res: self.params.multi_filter_c_res.value(),
+                multi_filter_c_amt: self.params.multi_filter_c_amt.value(),
+                dist_enable: self.params.dist_enable.value(),
+                dist_drive: self.params.dist_drive.value(),
+                dist_tone: self.params.dist_tone.value(),
+                dist_magic: self.params.dist_magic.value(),
+                dist_mix: self.params.dist_mix.value(),
+                eq_enable: self.params.eq_enable.value(),
+                eq_low_gain: self.params.eq_low_gain.value(),
+                eq_mid_gain: self.params.eq_mid_gain.value(),
+                eq_mid_freq: self.params.eq_mid_freq.value(),
+                eq_mid_q: self.params.eq_mid_q.value(),
+                eq_high_gain: self.params.eq_high_gain.value(),
+                eq_mix: self.params.eq_mix.value(),
+                delay_enable: self.params.delay_enable.value(),
+                delay_time_ms: self.params.delay_time_ms.value(),
+                delay_feedback: self.params.delay_feedback.value(),
+                delay_mix: self.params.delay_mix.value(),
+                reverb_enable: self.params.reverb_enable.value(),
+                reverb_size: self.params.reverb_size.value(),
+                reverb_damp: self.params.reverb_damp.value(),
+                reverb_diffusion: self.params.reverb_diffusion.value(),
+                reverb_shimmer: self.params.reverb_shimmer.value(),
+                reverb_mix: self.params.reverb_mix.value(),
+                output_sat_enable: self.params.output_sat_enable.value(),
+                output_sat_type: self.params.output_sat_type.value(),
+                output_sat_drive: self.params.output_sat_drive.value(),
+                output_sat_mix: self.params.output_sat_mix.value(),
+                limiter_enable: self.params.limiter_enable.value(),
+                limiter_threshold: self.params.limiter_threshold.value(),
+                limiter_release: self.params.limiter_release.value(),
+                fm_env_amount: self.params.fm_env_amount.value(),
+                dist_env_amount: self.params.dist_env_amount.value(),
+            };
+
+            let tempo = context.transport().tempo.unwrap_or(120.0) as f32;
+            let (l_slice, r_slice) = output.split_at_mut(1);
+            let mut out_block = [&mut *l_slice[0], &mut *r_slice[0]];
+
+            self.render_block_voices(
+                block_start,
+                block_end,
+                &mut out_block,
+                &block_params,
+                sample_rate,
+                tempo,
+                &gain,
+                &mut voice_gain,
+                &mut seq_gate_values,
+                &mut seq_dist_values,
+                &mut dist_env_values,
+            );
+
+            self.apply_block_fx(
+                block_start,
+                block_end,
+                &mut out_block,
+                &block_params,
+                sample_rate,
+                &gain,
+                &seq_dist_values,
+                &dist_env_values,
+            );
+
+            for voice in &mut self.voices {
+                if let Some(v) = voice {
+                    if v.releasing && v.amp_envelope.get_state() == ADSREnvelopeState::Idle {
+                        context.send_event(NoteEvent::VoiceTerminated {
+                            timing: block_end as u32,
+                            voice_id: Some(v.voice_id),
+                            channel: v.channel,
+                            note: v.note,
+                        });
+                        *voice = None;
+                    }
+                }
+            }
+            self.last_note_active = self.voices.iter().any(|v| v.is_some());
+
+            block_start = block_end;
+            block_end = (block_start + MAX_BLOCK_SIZE).min(num_samples);
+        }
+
+        ProcessStatus::Normal
+    }
+}
+
+impl SubSynth {
+    fn get_voice_idx(&mut self, voice_id: i32) -> Option<usize> {
+        self.voices
+            .iter_mut()
+            .position(|voice| matches!(voice, Some(voice) if voice.voice_id == voice_id))
+    }
+
+    fn refresh_custom_wavetable(&mut self) {
+        if let Ok(mut data) = self.params.custom_wavetable_data.try_write() {
+            if let Some(table) = data.take() {
+                self.custom_wavetable = Some(WavetableBank::from_table(table));
+                if let Ok(path) = self.params.custom_wavetable_path.read() {
+                    self.custom_wavetable_path = (*path).clone();
+                }
+            }
+        }
+
+        if self.custom_wavetable.is_none() {
+            if let Ok(path) = self.params.custom_wavetable_path.read() {
+                if let Some(path) = (*path).as_ref() {
+                    if self.custom_wavetable_path.as_deref() != Some(path.as_str()) {
+                        if let Ok(table) = waveform::load_wavetable_from_file(std::path::Path::new(path)) {
+                            self.custom_wavetable = Some(WavetableBank::from_table(table));
+                            self.custom_wavetable_path = Some(path.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn construct_envelopes(
+        &self,
+        sample_rate: f32,
+        velocity: f32,
+    ) -> (ADSREnvelope, ADSREnvelope, ADSREnvelope) {
+        (
+            ADSREnvelope::new(
+                self.params.amp_attack_ms.value(),
+                self.params.amp_envelope_level.value(),
+                self.params.amp_decay_ms.value(),
+                self.params.amp_sustain_level.value(),
+                self.params.amp_release_ms.value(),
+                sample_rate,
+                velocity,
+                self.params.amp_tension.value(),
+            ),
+            ADSREnvelope::new(
+                self.params.filter_cut_attack_ms.value(),
+                self.params.filter_cut_envelope_level.value(),
+                self.params.filter_cut_decay_ms.value(),
+                self.params.filter_cut_sustain_ms.value(),
+                self.params.filter_cut_release_ms.value(),
+                sample_rate,
+                velocity,
+                self.params.filter_cut_tension.value(),
+            ),
+            ADSREnvelope::new(
+                self.params.filter_res_attack_ms.value(),
+                self.params.filter_res_envelope_level.value(),
+                self.params.filter_res_decay_ms.value(),
+                self.params.filter_res_sustain_ms.value(),
+                self.params.filter_res_release_ms.value(),
+                sample_rate,
+                velocity,
+                self.params.filter_res_tension.value(),
+            ),
+        )
+    }
+
+    fn start_voice(
+        &mut self,
+        context: &mut impl ProcessContext<Self>,
+        sample_offset: u32,
+        voice_id: Option<i32>,
+        channel: u8,
+        note: u8,
+        velocity: f32,
+        pan: f32,
+        pressure: f32,
+        brightness: f32,
+        expression: f32,
+        vibrato: f32,
+        tuning: f32,
+        vib_mod: Modulator,
+        trem_mod: Modulator,
+        mod_lfo1: Modulator,
+        mod_lfo2: Modulator,
+        amp_envelope: ADSREnvelope,
+        filter_cut_envelope: ADSREnvelope,
+        filter_res_envelope: ADSREnvelope,
+        fm_envelope: ADSREnvelope,
+        dist_envelope: ADSREnvelope,
+        filter: FilterType,
+        sample_rate: f32,
+    ) -> &mut Voice {
+        // Use the passed envelopes instead of creating new ones
+        let new_voice = Voice {
+            voice_id: voice_id.unwrap_or_else(|| {
+                self.next_voice_index += 1;
+                Self::compute_fallback_voice_id(note, channel, self.next_voice_index as i32)
+            }),
+            internal_voice_id: self.next_internal_voice_id,
+            channel,
+            note,
+            velocity,
+            velocity_sqrt: velocity.sqrt(),
+            pan,
+            pressure,
+            brightness,
+            expression,
+            vibrato,
+            tuning,
+            phase: 0.0,
+            phase_delta: 0.0,
+            target_phase_delta: 0.0,
+            releasing: false,
+            amp_envelope,
+            voice_gain: None,
+            filter_cut_envelope,
+            filter_res_envelope,
+            fm_envelope,
+            dist_envelope,
+            filter: Some(filter),
+            lowpass_filter: filter::LowpassFilter::new(1000.0, 0.5, sample_rate),
+            highpass_filter: filter::HighpassFilter::new(1000.0, 0.5, sample_rate),
+            bandpass_filter: filter::BandpassFilter::new(1000.0, 0.5, sample_rate),
+            notch_filter: filter::NotchFilter::new(1000.0, 1.0, sample_rate),
+            statevariable_filter: filter::StatevariableFilter::new(1000.0, 0.5, sample_rate),
+            comb_filter: filter::CombFilter::new(sample_rate),
+            rainbow_comb_filter: filter::RainbowCombFilter::new(sample_rate),
+            diode_ladder_lp_filter: filter::DiodeLadderFilter::new_lowpass(sample_rate),
+            diode_ladder_hp_filter: filter::DiodeLadderFilter::new_highpass(sample_rate),
+            ms20_filter: filter::Ms20Filter::new(sample_rate),
+            formant_morph_filter: filter::FormantMorphFilter::new(sample_rate),
+            phaser_filter: filter::PhaserFilter::new(sample_rate),
+            comb_allpass_filter: filter::CombAllpassFilter::new(sample_rate),
+            bitcrush_lp_filter: filter::BitcrushLpFilter::new(sample_rate),
+            vib_mod,
+            trem_mod,
+            mod_lfo1,
+            mod_lfo2,
+            pan_mod: Modulator::new(
+                self.params.pan_lfo_rate.value(),
+                self.params.pan_lfo_intensity.value(),
+                self.params.pan_lfo_attack.value(),
+                self.params.pan_lfo_shape.value(),
+            ),
+            drift_offset: 0.0,
+            mod_smooth: [0.0; 6],
+            fm_feedback_state: 0.0,
+            unison_phases: [0.0; 6],
+            stereo_prev: 0.0,
+            dc_blocker: filter::DCBlocker::new(),
+        };
+
+        self.next_internal_voice_id = self.next_internal_voice_id.wrapping_add(1);
+
+        if let Some(free_voice_idx) = self.voices.iter().position(|voice| voice.is_none()) {
+            let voice = &mut self.voices[free_voice_idx];
+            if voice.is_none() {
+                *voice = Some(new_voice);
+                let voice = voice.as_mut().unwrap();
+                voice.amp_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
+                voice.filter_cut_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
+                voice.filter_res_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
+                voice.fm_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
+                voice.dist_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
+                voice.vib_mod.trigger();
+                voice.trem_mod.trigger();
+                voice.mod_lfo1.trigger();
+                voice.mod_lfo2.trigger();
+            }
+            voice.as_mut().unwrap()
+        } else {
+            let oldest_voice = self
+                .voices
+                .iter_mut()
+                .min_by_key(|voice| voice.as_ref().map(|v| v.internal_voice_id).unwrap_or(u64::MAX))
+                .unwrap();
+            let oldest_voice = oldest_voice.as_mut().unwrap();
+
+            if oldest_voice.amp_envelope.get_state() == ADSREnvelopeState::Idle ||
+                oldest_voice.amp_envelope.get_state() == ADSREnvelopeState::Release
+            {
+                // If the oldest voice's amp envelope is already idle or releasing, no need to send a voice terminated event
+                *oldest_voice = new_voice;
+                oldest_voice.amp_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
+                oldest_voice.filter_cut_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
+                oldest_voice.filter_res_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
+                oldest_voice.releasing = false; // Reset the releasing flag
+                oldest_voice.vib_mod.trigger();
+                oldest_voice.trem_mod.trigger();
+                oldest_voice.mod_lfo1.trigger();
+                oldest_voice.mod_lfo2.trigger();
+            } else {
+                context.send_event(NoteEvent::VoiceTerminated {
+                    timing: sample_offset,
+                    voice_id: Some(oldest_voice.voice_id),
+                    channel: oldest_voice.channel,
+                    note: oldest_voice.note,
+                });
+    
+                *oldest_voice = new_voice;
+            }
+    
+            oldest_voice
+        }
+    }
+
+    fn start_release_for_voices(
+        &mut self,
+        _sample_rate: f32,
+        voice_id: Option<i32>,
+        channel: u8,
+        note: u8,
+    ) {
+        for voice in &mut self.voices {
+            if let Some(voice) = voice {
+                if voice_id == Some(voice.voice_id) || (channel == voice.channel && note == voice.note) {
+                    voice.releasing = true;
+                    voice.amp_envelope.set_envelope_stage(ADSREnvelopeState::Release);
+                    voice.filter_cut_envelope.set_envelope_stage(ADSREnvelopeState::Release);
+                    voice.filter_res_envelope.set_envelope_stage(ADSREnvelopeState::Release);
+                    voice.fm_envelope.set_envelope_stage(ADSREnvelopeState::Release);
+                    voice.dist_envelope.set_envelope_stage(ADSREnvelopeState::Release);
+                }
+            }
+        }
+    }
+
+    fn _find_voice(&mut self, voice_id: Option<i32>, channel: u8, note: u8) -> Option<&mut Voice> {
+        self.voices
+            .iter_mut()
+            .find(|voice| {
+                let voice_id = voice_id.clone(); // Clone the voice_id for comparison inside the closure
+                if let Some(voice) = voice {
+                    voice.voice_id == voice_id.unwrap_or(voice.voice_id)
+                        && voice.channel == channel
+                        && voice.note == note
+                } else {
+                    false
+                }
+            })
+            .map(|voice| voice.as_mut().unwrap())
+    }
+
+    fn compute_fallback_voice_id(note: u8, channel: u8, next_voice_id: i32) -> i32 {
+        // Fallback voice ID computation...
+        // Modify this function to generate a unique voice ID based on note, channel, and next_voice_id.
+        // Example implementation:
+        (note as i32) + (channel as i32) + next_voice_id
+    }
+
+    fn find_or_create_voice(
+        &mut self,
+        voice_id: Option<i32>,
+        channel: u8,
+        note: u8,
+        pan: f32,
+        pressure:f32,
+        brightness: f32,
+        expression: f32,
+        tuning: f32,
+        vibrato: f32,
+        amp_envelope: ADSREnvelope,
+        filter_cut_envelope: ADSREnvelope,
+        filter_res_envelope: ADSREnvelope,
+        vib_mod: Modulator,
+        trem_mod: Modulator,
+    ) -> &mut Voice {
+        // Search for an existing voice with the given voice_id
+        if let Some(existing_index) = self.voices.iter().position(|voice| {
+            voice
+                .as_ref()
+                .map(|voice_ref| {
+                    voice_ref.voice_id == voice_id.unwrap_or(voice_ref.voice_id)
+                        && voice_ref.channel == channel
+                        && voice_ref.note == note
+                })
+                .unwrap_or(false)
+        }) {
+            return self.voices[existing_index].as_mut().unwrap();
+        }
+
+        // If no existing voice found, create a new voice
+        let new_voice_id = voice_id.unwrap_or_else(|| {
+            // Generate a fallback voice ID
+            self.next_voice_index += 1;
+            Self::compute_fallback_voice_id(
+                note,
+                channel,
+                self.next_voice_index as i32,
+            )
+        });
+
+        let mut new_voice = Voice {
+            voice_id: new_voice_id,
+            channel,
+            note,
+            internal_voice_id: self.next_internal_voice_id,
+            velocity: 0.0,
+            velocity_sqrt: 0.0,
+            phase: 0.0,
+            phase_delta: 0.0,
+            target_phase_delta: 0.0,
+            releasing: false,
+            amp_envelope,
+            voice_gain: None,
+            filter_cut_envelope,
+            filter_res_envelope,
+            fm_envelope: ADSREnvelope::new(
+                self.params.fm_env_attack_ms.value(),
+                self.params.fm_env_amount.value(),
+                self.params.fm_env_decay_ms.value(),
+                self.params.fm_env_sustain_level.value(),
+                self.params.fm_env_release_ms.value(),
+                self.sample_rate,
+                1.0,
+                0.0,
+            ),
+            dist_envelope: ADSREnvelope::new(
+                self.params.dist_env_attack_ms.value(),
+                self.params.dist_env_amount.value(),
+                self.params.dist_env_decay_ms.value(),
+                self.params.dist_env_sustain_level.value(),
+                self.params.dist_env_release_ms.value(),
+                self.sample_rate,
+                1.0,
+                0.0,
+            ),
+            filter: Some(self.params.filter_type.value()),
+            lowpass_filter: filter::LowpassFilter::new(1000.0, 0.5, self.sample_rate),
+            highpass_filter: filter::HighpassFilter::new(1000.0, 0.5, self.sample_rate),
+            bandpass_filter: filter::BandpassFilter::new(1000.0, 0.5, self.sample_rate),
+            notch_filter: filter::NotchFilter::new(1000.0, 1.0, self.sample_rate),
+            statevariable_filter: filter::StatevariableFilter::new(1000.0, 0.5, self.sample_rate),
+            comb_filter: filter::CombFilter::new(self.sample_rate),
+            rainbow_comb_filter: filter::RainbowCombFilter::new(self.sample_rate),
+            diode_ladder_lp_filter: filter::DiodeLadderFilter::new_lowpass(self.sample_rate),
+            diode_ladder_hp_filter: filter::DiodeLadderFilter::new_highpass(self.sample_rate),
+            ms20_filter: filter::Ms20Filter::new(self.sample_rate),
+            formant_morph_filter: filter::FormantMorphFilter::new(self.sample_rate),
+            phaser_filter: filter::PhaserFilter::new(self.sample_rate),
+            comb_allpass_filter: filter::CombAllpassFilter::new(self.sample_rate),
+            bitcrush_lp_filter: filter::BitcrushLpFilter::new(self.sample_rate),
+            pan,
+            pressure,
+            brightness,
+            expression,
+            tuning,
+            vibrato,
+            vib_mod,
+            trem_mod,
+            mod_lfo1: Modulator::new(
+                self.params.lfo1_rate.value(),
+                1.0,
+                self.params.lfo1_attack.value(),
+                self.params.lfo1_shape.value(),
+            ),
+            mod_lfo2: Modulator::new(
+                self.params.lfo2_rate.value(),
+                1.0,
+                self.params.lfo2_attack.value(),
+                self.params.lfo2_shape.value(),
+            ),
+            pan_mod: Modulator::new(
+                self.params.pan_lfo_rate.value(),
+                self.params.pan_lfo_intensity.value(),
+                self.params.pan_lfo_attack.value(),
+                self.params.pan_lfo_shape.value(),
+            ),
+            drift_offset: 0.0,
+            mod_smooth: [0.0; 6],
+            fm_feedback_state: 0.0,
+            unison_phases: [0.0; 6],
+            stereo_prev: 0.0,
+            dc_blocker: filter::DCBlocker::new(),
+        };
+        new_voice.amp_envelope.trigger();
+        new_voice.filter_cut_envelope.trigger();
+        new_voice.filter_res_envelope.trigger();
+        new_voice.fm_envelope.trigger();
+        new_voice.dist_envelope.trigger();
+        new_voice.vib_mod.trigger();
+        new_voice.trem_mod.trigger();
+        // Find the next available slot for a new voice
+        let mut next_voice_index = self.next_voice_index;
+        while self.voices[next_voice_index].is_some() {
+            next_voice_index = (next_voice_index + 1) % NUM_VOICES;
+            if next_voice_index == self.next_voice_index {
+                break;
+            }
+        }
+
+        // Store the new voice in the found slot
+        self.voices[next_voice_index] = Some(new_voice);
+
+        // Update the next available slot index
+        self.next_voice_index = next_voice_index;
+
+        // Return a mutable reference to the newly created voice
+        self.voices[next_voice_index].as_mut().unwrap()
+
+    }
+
+    fn handle_poly_event(
+        &mut self,
+        _timing: u32,
+        voice_id: Option<i32>,
+        channel: u8,
+        note: u8,
+        gain: Option<f32>,
+        pan: Option<f32>,
+        brightness: Option<f32>,
+        expression: Option<f32>,
+        tuning: Option<f32>,
+        pressure: Option<f32>,
+        vibrato: Option<f32>,
+    ) {
+        let existing_index = self.voices.iter().position(|voice| {
+            voice
+                .as_ref()
+                .map(|voice_ref| {
+                    voice_id == Some(voice_ref.voice_id)
+                        || (voice_ref.channel == channel && voice_ref.note == note)
+                })
+                .unwrap_or(false)
+        });
+
+        let Some(existing_index) = existing_index else {
+            return;
+        };
+
+        let Some(voice) = self.voices[existing_index].as_mut() else {
+            return;
+        };
+
+        if let Some(gain) = gain {
+            voice.velocity = gain;
+            voice.velocity_sqrt = gain.sqrt();
+            voice.amp_envelope.set_velocity(gain);
+        }
+        if let Some(pan) = pan {
+            voice.pan = pan;
+        }
+        if let Some(brightness) = brightness {
+            voice.brightness = brightness;
+        }
+        if let Some(expression) = expression {
+            voice.expression = expression;
+        }
+        if let Some(tuning) = tuning {
+            voice.tuning = tuning;
+        }
+        if let Some(pressure) = pressure {
+            voice.pressure = pressure;
+        }
+        if let Some(vibrato) = vibrato {
+            voice.vibrato = vibrato;
+        }
+    }
+    
+    
+
+    fn choke_voices(
+        &mut self,
+        context: &mut impl ProcessContext<Self>,
+        sample_offset: u32,
+        voice_id: Option<i32>,
+        channel: u8,
+        note: u8,
+    ) {
+        for voice in self.voices.iter_mut() {
+            match voice {
+                Some(Voice {
+                    voice_id: candidate_voice_id,
+                    channel: candidate_channel,
+                    note: candidate_note,
+                    ..
+                }) if voice_id == Some(*candidate_voice_id)
+                    || (channel == *candidate_channel && note == *candidate_note) =>
+                {
+                    context.send_event(NoteEvent::VoiceTerminated {
+                        timing: sample_offset,
+                        voice_id: Some(*candidate_voice_id),
+                        channel,
+                        note,
+                    });
+                    *voice = None;
+
+                    if voice_id.is_some() {
+                        return;
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+    pub fn clip(input: f32, limit: f32) -> f32 {
+        if input > limit {
+            limit
+        } else if input < -limit {
+            -limit
+        } else {
+            input
+        }
+    }
+    pub fn poly_blep(t: f32, dt: f32) -> f32 {
+        if t < dt {
+            let t = t / dt;
+            // 2 * (t - t^2/2 - 0.5)
+            return t + t - t * t - 1.0;
+        } else if t > 1.0 - dt {
+            let t = (t - 1.0) / dt;
+            // 2 * (t^2/2 + t + 0.5)
+            return t * t + t + t + 1.0;
+        }
+        0.0
+    }
+
+    pub fn wavefold(sample: f32, amount: f32) -> f32 {
+        if amount <= 0.0 {
+            return sample;
+        }
+
+        let drive = 1.0 + amount * 8.0;
+        let x = sample * drive;
+        let mut folded = (x + 1.0).rem_euclid(4.0);
+        if folded > 2.0 {
+            folded = 4.0 - folded;
+        }
+        folded - 1.0
+    }
+}
+
+impl ClapPlugin for SubSynth {
+    const CLAP_ID: &'static str = "art.catsynth";
+    const CLAP_DESCRIPTION: Option<&'static str> =
+        Some("A knitty gritty wavetable bass synth for dubstep and heavy electronic sound design");
+    const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
+    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::Instrument,
+        ClapFeature::Synthesizer,
+        ClapFeature::Stereo,
+    ];
+
+    const CLAP_POLY_MODULATION_CONFIG: Option<PolyModulationConfig> = Some(PolyModulationConfig {
+        max_voice_capacity: NUM_VOICES as u32,
+        supports_overlapping_voices: true,
+    });
+}
+
+impl Vst3Plugin for SubSynth {
+    const VST3_CLASS_ID: [u8; 16] = *b"CatSynthLing1A01";
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
+        Vst3SubCategory::Instrument,
+        Vst3SubCategory::Synth,
+        Vst3SubCategory::Stereo,
+    ];
+}
+
+struct DrumBlockParams {
+    master_gain: f32,
+    master_drive: f32,
+    master_comp: f32,
+    master_clip: f32,
+    kit_preset: DrumOrganicKitPreset,
+    seq_enabled: bool,
+    seq_rate: f32,
+    seq_swing: f32,
+}
+
+
+struct DrumSynth {
+    params: Arc<DrumSynthParams>,
+    engine: DrumEngine,
+    sequencer: DrumSequencer,
+    pad_triggers: [f32; DRUM_SLOTS],
+    comp_env: f32,
+}
+
+const DRUM_AUX_OUTPUT_COUNT: usize = 16;
+const DRUM_AUX_OUTPUT_PORTS: [NonZeroU32; DRUM_AUX_OUTPUT_COUNT] =
+    [new_nonzero_u32(2); DRUM_AUX_OUTPUT_COUNT];
+const DRUM_AUX_OUTPUT_NAMES: [&str; DRUM_AUX_OUTPUT_COUNT] = [
+    "Pad 01",
+    "Pad 02",
+    "Pad 03",
+    "Pad 04",
+    "Pad 05",
+    "Pad 06",
+    "Pad 07",
+    "Pad 08",
+    "Pad 09",
+    "Pad 10",
+    "Pad 11",
+    "Pad 12",
+    "Pad 13",
+    "Pad 14",
+    "Pad 15",
+    "Pad 16",
+];
+
+fn collect_aux_outputs<'a>(
+    aux: &'a mut AuxiliaryBuffers,
+    range: std::ops::Range<usize>,
+) -> Vec<AuxOutput<'a>> {
+    if aux.outputs.is_empty() {
+        return Vec::new();
+    }
+    let mut outputs = Vec::with_capacity(aux.outputs.len());
+    for output in aux.outputs.iter_mut() {
+        let channels = output.as_slice();
+        if channels.len() < 2 {
+            continue;
+        }
+        let (left_channels, right_channels) = channels.split_at_mut(1);
+        let max_len = left_channels[0].len().min(right_channels[0].len());
+        if range.start >= max_len {
+            continue;
+        }
+        let end = range.end.min(max_len);
+        outputs.push(AuxOutput {
+            left: &mut left_channels[0][range.start..end],
+            right: &mut right_channels[0][range.start..end],
+        });
+    }
+    outputs
+}
+
+impl Default for DrumSynth {
+    fn default() -> Self {
+        Self {
+            params: Arc::new(DrumSynthParams::default()),
+            engine: DrumEngine::new(),
+            sequencer: DrumSequencer::new(),
+            pad_triggers: [0.0; DRUM_SLOTS],
+            comp_env: 0.0,
+        }
+    }
+}
+
+impl Plugin for DrumSynth {
+    const NAME: &'static str = "CatSynth Drums";
+    const VENDOR: &'static str = "CatSynth";
+    const URL: &'static str = "https://taellinglin.art";
+    const EMAIL: &'static str = "taellinglin@gmail.com";
+
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
+        main_input_channels: None,
+        main_output_channels: NonZeroU32::new(2),
+        aux_output_ports: &DRUM_AUX_OUTPUT_PORTS,
+        names: PortNames {
+            main_output: Some("Main"),
+            aux_outputs: &DRUM_AUX_OUTPUT_NAMES,
+            ..PortNames::const_default()
+        },
+        ..AudioIOLayout::const_default()
+    }];
+
+    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
+    const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+
+    type SysExMessage = ();
+    type BackgroundTask = ();
+
+    fn params(&self) -> Arc<dyn Params> {
+        self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create_drum(self.params.clone(), self.params.editor_state.clone())
+    }
+
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        _context: &mut impl InitContext<Self>,
+    ) -> bool {
+        self.engine.set_sample_rate(buffer_config.sample_rate);
+        self.sequencer.reset();
+        true
+    }
+
+    fn reset(&mut self) {
+        self.sequencer.reset();
+        self.comp_env = 0.0;
+    }
+
+    fn process(
+        &mut self,
+        buffer: &mut Buffer,
+        aux: &mut AuxiliaryBuffers,
+        context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        let num_samples = buffer.samples();
+        let sample_rate = context.transport().sample_rate;
+        let output = buffer.as_slice();
+        if output.len() < 2 {
+            for channel in output.iter_mut() {
+                channel.fill(0.0);
+            }
+            return ProcessStatus::Normal;
+        }
+
+        let (left_slice, right_slice) = output.split_at_mut(1);
+        let left = &mut left_slice[0];
+        let right = &mut right_slice[0];
+        left.fill(0.0);
+        right.fill(0.0);
+
+        if !aux.outputs.is_empty() {
+            for output in aux.outputs.iter_mut() {
+                for channel in output.as_slice().iter_mut() {
+                    channel.fill(0.0);
+                }
+            }
+        }
+
+        let kit = self.params.kit_preset.value();
+        self.handle_pad_triggers(kit);
+
+        let mut next_event = context.next_event();
+        let mut block_start: usize = 0;
+        let mut block_end: usize = MAX_BLOCK_SIZE.min(num_samples);
+
+        while block_start < num_samples {
+            'events: loop {
+                match next_event {
+                    Some(event) if (event.timing() as usize) < block_end => {
+                        self.handle_event(context, event, kit);
+                        next_event = context.next_event();
+                    }
+                    Some(event) if (event.timing() as usize) < block_end => {
+                        block_end = event.timing() as usize;
+                        break 'events;
+                    }
+                    _ => break 'events,
+                }
+            }
+
+            let block_params = DrumBlockParams {
+                master_gain: self.params.master_gain.value().clamp(0.0, 1.0),
+                master_drive: self.params.master_drive.value().clamp(0.0, 1.0),
+                master_comp: self.params.master_comp.value().clamp(0.0, 1.0),
+                master_clip: self.params.master_clip.value().clamp(0.0, 1.0),
+                kit_preset: kit,
+                seq_enabled: self.params.sequencer.enabled.value(),
+                seq_rate: self.params.sequencer.rate.value(),
+                seq_swing: self.params.sequencer.swing.value(),
+            };
+
+            let tempo = context.transport().tempo.unwrap_or(120.0) as f32;
+
+            self.render_block_drums(
+                block_start,
+                block_end,
+                left,
+                right,
+                aux,
+                &block_params,
+                tempo,
+                sample_rate,
+            );
+
+            self.apply_block_fx(
+                block_start,
+                block_end,
+                left,
+                right,
+                &block_params,
+                sample_rate,
+            );
+
+            block_start = block_end;
+            block_end = (block_start + MAX_BLOCK_SIZE).min(num_samples);
+        }
+
+        ProcessStatus::Normal
+    }
+}
+
+impl ClapPlugin for DrumSynth {
+    const CLAP_ID: &'static str = "art.catsynth.drums";
+    const CLAP_DESCRIPTION: Option<&'static str> =
+        Some("Physical modeling drum synth with 16-slot sequencer");
+    const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
+    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::Instrument,
+        ClapFeature::Synthesizer,
+        ClapFeature::Drum,
+        ClapFeature::DrumMachine,
+        ClapFeature::Stereo,
+    ];
+}
+
+impl Vst3Plugin for DrumSynth {
+    const VST3_CLASS_ID: [u8; 16] = *b"CatDrumLing1A01X";
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
+        Vst3SubCategory::Instrument,
+        Vst3SubCategory::Synth,
+        Vst3SubCategory::Drum,
+        Vst3SubCategory::Stereo,
+    ];
+}
+
+nih_export_clap!(DrumSynth);
+nih_export_vst3!(DrumSynth);
+impl SubSynth {
     fn handle_event(
         &mut self,
         context: &mut impl ProcessContext<Self>,
-        event: NoteEvent<Self>,
+        event: NoteEvent<()>,
         this_sample_internal_voice_id_start: u64,
         sample_rate: f32,
     ) {
@@ -1101,943 +2207,14 @@ impl Plugin for SubSynth {
             output[1][sample_idx] *= gain[value_idx];
         }
     }
-
-    fn process(
-        &mut self,
-        buffer: &mut Buffer,
-        _aux: &mut AuxiliaryBuffers,
-        context: &mut impl ProcessContext<Self>,
-    ) -> ProcessStatus {
-        let num_samples = buffer.samples();
-        let sample_rate = context.transport().sample_rate;
-        let output = buffer.as_slice();
-        if output.len() < 2 {
-            for channel in output.iter_mut() {
-                channel.fill(0.0);
-            }
-            return ProcessStatus::Normal;
-        }
-
-        self.delay.set_sample_rate(sample_rate);
-        self.reverb.set_sample_rate(sample_rate);
-        self.multi_filter.set_sample_rate(sample_rate);
-        self.distortion.set_sample_rate(sample_rate);
-        self.eq.set_sample_rate(sample_rate);
-        self.output_saturation.set_sample_rate(sample_rate);
-        self.refresh_custom_wavetable();
-
-        let mut next_event = context.next_event();
-        let mut block_start: usize = 0;
-        let mut block_end: usize = MAX_BLOCK_SIZE.min(num_samples);
-        while block_start < num_samples {
-            let this_sample_internal_voice_id_start = self.next_internal_voice_id;
-            'events: loop {
-                match next_event {
-                    Some(event) if (event.timing() as usize) < block_end => {
-                        self.handle_event(context, event, this_sample_internal_voice_id_start, sample_rate);
-                        next_event = context.next_event();
-                    }
-                    Some(event) if (event.timing() as usize) < block_end => {
-                        block_end = event.timing() as usize;
-                        break 'events;
-                    }
-                    _ => break 'events,
-                }
-            }
-
-            output[0][block_start..block_end].fill(0.0);
-            output[1][block_start..block_end].fill(0.0);
-
-            let block_len = block_end - block_start;
-            let mut gain = [0.0; MAX_BLOCK_SIZE];
-            let mut voice_gain = [0.0; MAX_BLOCK_SIZE];
-            let mut seq_gate_values = [1.0; MAX_BLOCK_SIZE];
-            let mut seq_dist_values = [0.0; MAX_BLOCK_SIZE];
-            let mut dist_env_values = [0.0; MAX_BLOCK_SIZE];
-            self.params.gain.smoothed.next_block(&mut gain, block_len);
-
-            let block_params = BlockParams {
-                gain: self.params.gain.value(),
-                waveform: self.params.waveform.value(),
-                osc_routing: self.params.osc_routing.value(),
-                osc_blend: self.params.osc_blend.value(),
-                wavetable_position: self.params.wavetable_position.value(),
-                wavetable_distortion: self.params.wavetable_distortion.value(),
-                classic_drive: self.params.classic_drive.value(),
-                custom_wavetable_enable: self.params.custom_wavetable_enable.value(),
-                analog_enable: self.params.analog_enable.value(),
-                analog_drive: self.params.analog_drive.value(),
-                analog_noise: self.params.analog_noise.value(),
-                analog_drift: self.params.analog_drift.value(),
-                sub_level: self.params.sub_level.value(),
-                unison_voices: self.params.unison_voices.value(),
-                unison_detune: self.params.unison_detune.value(),
-                unison_spread: self.params.unison_spread.value(),
-                glide_mode: self.params.glide_mode.value(),
-                glide_time_ms: self.params.glide_time_ms.value(),
-                filter_type: self.params.filter_type.value(),
-                filter_cut: self.params.filter_cut.value(),
-                filter_res: self.params.filter_res.value(),
-                filter_amount: self.params.filter_amount.value(),
-                filter_cut_envelope_level: self.params.filter_cut_envelope_level.value(),
-                filter_res_envelope_level: self.params.filter_res_envelope_level.value(),
-                amp_envelope_level: self.params.amp_envelope_level.value(),
-                fm_enable: self.params.fm_enable.value(),
-                fm_source: self.params.fm_source.value(),
-                fm_target: self.params.fm_target.value(),
-                fm_amount: self.params.fm_amount.value(),
-                fm_ratio: self.params.fm_ratio.value(),
-                fm_feedback: self.params.fm_feedback.value(),
-                vibrato_intensity: self.params.vibrato_intensity.value(),
-                vibrato_rate: self.params.vibrato_rate.value(),
-                vibrato_attack: self.params.vibrato_attack.value(),
-                vibrato_shape: self.params.vibrato_shape.value(),
-                tremolo_intensity: self.params.tremolo_intensity.value(),
-                tremolo_rate: self.params.tremolo_rate.value(),
-                tremolo_attack: self.params.tremolo_attack.value(),
-                tremolo_shape: self.params.tremolo_shape.value(),
-                lfo1_rate: self.params.lfo1_rate.value(),
-                lfo1_attack: self.params.lfo1_attack.value(),
-                lfo1_shape: self.params.lfo1_shape.value(),
-                lfo2_rate: self.params.lfo2_rate.value(),
-                lfo2_attack: self.params.lfo2_attack.value(),
-                lfo2_shape: self.params.lfo2_shape.value(),
-                mod1_source: self.params.mod1_source.value(),
-                mod1_target: self.params.mod1_target.value(),
-                mod1_amount: self.params.mod1_amount.value(),
-                mod1_smooth_ms: self.params.mod1_smooth_ms.value(),
-                mod2_source: self.params.mod2_source.value(),
-                mod2_target: self.params.mod2_target.value(),
-                mod2_amount: self.params.mod2_amount.value(),
-                mod2_smooth_ms: self.params.mod2_smooth_ms.value(),
-                mod3_source: self.params.mod3_source.value(),
-                mod3_target: self.params.mod3_target.value(),
-                mod3_amount: self.params.mod3_amount.value(),
-                mod3_smooth_ms: self.params.mod3_smooth_ms.value(),
-                mod4_source: self.params.mod4_source.value(),
-                mod4_target: self.params.mod4_target.value(),
-                mod4_amount: self.params.mod4_amount.value(),
-                mod4_smooth_ms: self.params.mod4_smooth_ms.value(),
-                mod5_source: self.params.mod5_source.value(),
-                mod5_target: self.params.mod5_target.value(),
-                mod5_amount: self.params.mod5_amount.value(),
-                mod5_smooth_ms: self.params.mod5_smooth_ms.value(),
-                mod6_source: self.params.mod6_source.value(),
-                mod6_target: self.params.mod6_target.value(),
-                mod6_amount: self.params.mod6_amount.value(),
-                mod6_smooth_ms: self.params.mod6_smooth_ms.value(),
-                seq_enable: self.params.seq_enable.value(),
-                seq_rate: self.params.seq_rate.value(),
-                seq_gate_amount: self.params.seq_gate_amount.value(),
-                seq_cut_amount: self.params.seq_cut_amount.value(),
-                seq_res_amount: self.params.seq_res_amount.value(),
-                seq_wt_amount: self.params.seq_wt_amount.value(),
-                seq_dist_amount: self.params.seq_dist_amount.value(),
-                seq_fm_amount: self.params.seq_fm_amount.value(),
-                pan_lfo_rate: self.params.pan_lfo_rate.value(),
-                pan_lfo_intensity: self.params.pan_lfo_intensity.value(),
-                pan_lfo_attack: self.params.pan_lfo_attack.value(),
-                pan_lfo_shape: self.params.pan_lfo_shape.value(),
-                
-                chorus_enable: self.params.chorus_enable.value(),
-                chorus_rate: self.params.chorus_rate.value(),
-                chorus_depth: self.params.chorus_depth.value(),
-                chorus_mix: self.params.chorus_mix.value(),
-                multi_filter_enable: self.params.multi_filter_enable.value(),
-                multi_filter_routing: self.params.multi_filter_routing.value(),
-                multi_filter_morph: self.params.multi_filter_morph.value(),
-                multi_filter_parallel_ab: self.params.multi_filter_parallel_ab.value(),
-                multi_filter_parallel_c: self.params.multi_filter_parallel_c.value(),
-                multi_filter_a_type: self.params.multi_filter_a_type.value(),
-                multi_filter_a_cut: self.params.multi_filter_a_cut.value(),
-                multi_filter_a_res: self.params.multi_filter_a_res.value(),
-                multi_filter_a_amt: self.params.multi_filter_a_amt.value(),
-                multi_filter_b_type: self.params.multi_filter_b_type.value(),
-                multi_filter_b_cut: self.params.multi_filter_b_cut.value(),
-                multi_filter_b_res: self.params.multi_filter_b_res.value(),
-                multi_filter_b_amt: self.params.multi_filter_b_amt.value(),
-                multi_filter_c_type: self.params.multi_filter_c_type.value(),
-                multi_filter_c_cut: self.params.multi_filter_c_cut.value(),
-                multi_filter_c_res: self.params.multi_filter_c_res.value(),
-                multi_filter_c_amt: self.params.multi_filter_c_amt.value(),
-                dist_enable: self.params.dist_enable.value(),
-                dist_drive: self.params.dist_drive.value(),
-                dist_tone: self.params.dist_tone.value(),
-                dist_magic: self.params.dist_magic.value(),
-                dist_mix: self.params.dist_mix.value(),
-                eq_enable: self.params.eq_enable.value(),
-                eq_low_gain: self.params.eq_low_gain.value(),
-                eq_mid_gain: self.params.eq_mid_gain.value(),
-                eq_mid_freq: self.params.eq_mid_freq.value(),
-                eq_mid_q: self.params.eq_mid_q.value(),
-                eq_high_gain: self.params.eq_high_gain.value(),
-                eq_mix: self.params.eq_mix.value(),
-                delay_enable: self.params.delay_enable.value(),
-                delay_time_ms: self.params.delay_time_ms.value(),
-                delay_feedback: self.params.delay_feedback.value(),
-                delay_mix: self.params.delay_mix.value(),
-                reverb_enable: self.params.reverb_enable.value(),
-                reverb_size: self.params.reverb_size.value(),
-                reverb_damp: self.params.reverb_damp.value(),
-                reverb_diffusion: self.params.reverb_diffusion.value(),
-                reverb_shimmer: self.params.reverb_shimmer.value(),
-                reverb_mix: self.params.reverb_mix.value(),
-                output_sat_enable: self.params.output_sat_enable.value(),
-                output_sat_type: self.params.output_sat_type.value(),
-                output_sat_drive: self.params.output_sat_drive.value(),
-                output_sat_mix: self.params.output_sat_mix.value(),
-                limiter_enable: self.params.limiter_enable.value(),
-                limiter_threshold: self.params.limiter_threshold.value(),
-                limiter_release: self.params.limiter_release.value(),
-            };
-
-            let tempo = context.transport().tempo.unwrap_or(120.0) as f32;
-            let (l_slice, r_slice) = output.split_at_mut(1);
-            let mut out_block = [l_slice[0], r_slice[0]];
-
-            self.render_block_voices(
-                block_start,
-                block_end,
-                &mut out_block,
-                &block_params,
-                sample_rate,
-                tempo,
-                &gain,
-                &mut voice_gain,
-                &mut seq_gate_values,
-                &mut seq_dist_values,
-                &mut dist_env_values,
-            );
-
-            self.apply_block_fx(
-                block_start,
-                block_end,
-                &mut out_block,
-                &block_params,
-                sample_rate,
-                &gain,
-                &seq_dist_values,
-                &dist_env_values,
-            );
-
-            for voice in &mut self.voices {
-                if let Some(v) = voice {
-                    if v.releasing && v.amp_envelope.get_state() == ADSREnvelopeState::Idle {
-                        context.send_event(NoteEvent::VoiceTerminated {
-                            timing: block_end as u32,
-                            voice_id: Some(v.voice_id),
-                            channel: v.channel,
-                            note: v.note,
-                        });
-                        *voice = None;
-                    }
-                }
-            }
-            self.last_note_active = self.voices.iter().any(|v| v.is_some());
-
-            block_start = block_end;
-            block_end = (block_start + MAX_BLOCK_SIZE).min(num_samples);
-        }
-
-        ProcessStatus::Normal
-    }
 }
 
-impl SubSynth {
-    fn get_voice_idx(&mut self, voice_id: i32) -> Option<usize> {
-        self.voices
-            .iter_mut()
-            .position(|voice| matches!(voice, Some(voice) if voice.voice_id == voice_id))
-    }
-
-    fn refresh_custom_wavetable(&mut self) {
-        if let Ok(mut data) = self.params.custom_wavetable_data.try_write() {
-            if let Some(table) = data.take() {
-                self.custom_wavetable = Some(WavetableBank::from_table(table));
-                if let Ok(path) = self.params.custom_wavetable_path.read() {
-                    self.custom_wavetable_path = (*path).clone();
-                }
-            }
-        }
-
-        if self.custom_wavetable.is_none() {
-            if let Ok(path) = self.params.custom_wavetable_path.read() {
-                if let Some(path) = (*path).as_ref() {
-                    if self.custom_wavetable_path.as_deref() != Some(path.as_str()) {
-                        if let Ok(table) = waveform::load_wavetable_from_file(std::path::Path::new(path)) {
-                            self.custom_wavetable = Some(WavetableBank::from_table(table));
-                            self.custom_wavetable_path = Some(path.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn construct_envelopes(
-        &self,
-        sample_rate: f32,
-        velocity: f32,
-    ) -> (ADSREnvelope, ADSREnvelope, ADSREnvelope) {
-        (
-            ADSREnvelope::new(
-                self.params.amp_attack_ms.value(),
-                self.params.amp_envelope_level.value(),
-                self.params.amp_decay_ms.value(),
-                self.params.amp_sustain_level.value(),
-                self.params.amp_release_ms.value(),
-                sample_rate,
-                velocity,
-                self.params.amp_tension.value(),
-            ),
-            ADSREnvelope::new(
-                self.params.filter_cut_attack_ms.value(),
-                self.params.filter_cut_envelope_level.value(),
-                self.params.filter_cut_decay_ms.value(),
-                self.params.filter_cut_sustain_ms.value(),
-                self.params.filter_cut_release_ms.value(),
-                sample_rate,
-                velocity,
-                self.params.filter_cut_tension.value(),
-            ),
-            ADSREnvelope::new(
-                self.params.filter_res_attack_ms.value(),
-                self.params.filter_res_envelope_level.value(),
-                self.params.filter_res_decay_ms.value(),
-                self.params.filter_res_sustain_ms.value(),
-                self.params.filter_res_release_ms.value(),
-                sample_rate,
-                velocity,
-                self.params.filter_res_tension.value(),
-            ),
-        )
-    }
-
-    fn start_voice(
-        &mut self,
-        context: &mut impl ProcessContext<Self>,
-        sample_offset: u32,
-        voice_id: Option<i32>,
-        channel: u8,
-        note: u8,
-        velocity: f32,
-        pan: f32,
-        pressure: f32,
-        brightness: f32,
-        expression: f32,
-        vibrato: f32,
-        tuning: f32,
-        vib_mod: Modulator,
-        trem_mod: Modulator,
-        mod_lfo1: Modulator,
-        mod_lfo2: Modulator,
-        amp_envelope: ADSREnvelope,
-        filter_cut_envelope: ADSREnvelope,
-        filter_res_envelope: ADSREnvelope,
-        fm_envelope: ADSREnvelope,
-        dist_envelope: ADSREnvelope,
-        filter: FilterType,
-        sample_rate: f32,
-    ) -> &mut Voice {
-        // Use the passed envelopes instead of creating new ones
-        let new_voice = Voice {
-            voice_id: voice_id.unwrap_or_else(|| compute_fallback_voice_id(note, channel)),
-            internal_voice_id: self.next_internal_voice_id,
-            channel,
-            note,
-            velocity,
-            velocity_sqrt: velocity.sqrt(),
-            pan,
-            pressure,
-            brightness,
-            expression,
-            vibrato,
-            tuning,
-            phase: 0.0,
-            phase_delta: 0.0,
-            target_phase_delta: 0.0,
-            releasing: false,
-            amp_envelope,
-            voice_gain: None,
-            filter_cut_envelope,
-            filter_res_envelope,
-            fm_envelope,
-            dist_envelope,
-            filter: Some(filter),
-            lowpass_filter: filter::LowpassFilter::new(1000.0, 0.5, sample_rate),
-            highpass_filter: filter::HighpassFilter::new(1000.0, 0.5, sample_rate),
-            bandpass_filter: filter::BandpassFilter::new(1000.0, 0.5, sample_rate),
-            notch_filter: filter::NotchFilter::new(1000.0, 1.0, sample_rate),
-            statevariable_filter: filter::StatevariableFilter::new(1000.0, 0.5, sample_rate),
-            comb_filter: filter::CombFilter::new(sample_rate),
-            rainbow_comb_filter: filter::RainbowCombFilter::new(sample_rate),
-            diode_ladder_lp_filter: filter::DiodeLadderFilter::new_lowpass(sample_rate),
-            diode_ladder_hp_filter: filter::DiodeLadderFilter::new_highpass(sample_rate),
-            ms20_filter: filter::Ms20Filter::new(sample_rate),
-            formant_morph_filter: filter::FormantMorphFilter::new(sample_rate),
-            phaser_filter: filter::PhaserFilter::new(sample_rate),
-            comb_allpass_filter: filter::CombAllpassFilter::new(sample_rate),
-            bitcrush_lp_filter: filter::BitcrushLpFilter::new(sample_rate),
-            vib_mod,
-            trem_mod,
-            mod_lfo1,
-            mod_lfo2,
-            pan_mod: Modulator::new(
-                self.params.pan_lfo_rate.value(),
-                self.params.pan_lfo_intensity.value(),
-                self.params.pan_lfo_attack.value(),
-                self.params.pan_lfo_shape.value(),
-            ),
-            drift_offset: 0.0,
-            mod_smooth: [0.0; 6],
-            fm_feedback_state: 0.0,
-            unison_phases: [0.0; 6],
-            stereo_prev: 0.0,
-            dc_blocker: filter::DCBlocker::new(),
-        };
-
-        self.next_internal_voice_id = self.next_internal_voice_id.wrapping_add(1);
-
-        if let Some(free_voice_idx) = self.voices.iter().position(|voice| voice.is_none()) {
-            let voice = &mut self.voices[free_voice_idx];
-            if voice.is_none() {
-                *voice = Some(new_voice);
-                let voice = voice.as_mut().unwrap();
-                voice.amp_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
-                voice.filter_cut_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
-                voice.filter_res_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
-                voice.fm_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
-                voice.dist_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
-                voice.vib_mod.trigger();
-                voice.trem_mod.trigger();
-                voice.mod_lfo1.trigger();
-                voice.mod_lfo2.trigger();
-            }
-            voice.as_mut().unwrap()
-        } else {
-            let oldest_voice = self
-                .voices
-                .iter_mut()
-                .min_by_key(|voice| voice.as_ref().map(|v| v.internal_voice_id).unwrap_or(u64::MAX))
-                .unwrap();
-            let oldest_voice = oldest_voice.as_mut().unwrap();
-
-            if oldest_voice.amp_envelope.get_state() == ADSREnvelopeState::Idle ||
-                oldest_voice.amp_envelope.get_state() == ADSREnvelopeState::Release
-            {
-                // If the oldest voice's amp envelope is already idle or releasing, no need to send a voice terminated event
-                *oldest_voice = new_voice;
-                oldest_voice.amp_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
-                oldest_voice.filter_cut_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
-                oldest_voice.filter_res_envelope.set_envelope_stage(ADSREnvelopeState::Attack);
-                oldest_voice.releasing = false; // Reset the releasing flag
-                oldest_voice.vib_mod.trigger();
-                oldest_voice.trem_mod.trigger();
-                oldest_voice.mod_lfo1.trigger();
-                oldest_voice.mod_lfo2.trigger();
-            } else {
-                context.send_event(NoteEvent::VoiceTerminated {
-                    timing: sample_offset,
-                    voice_id: Some(oldest_voice.voice_id),
-                    channel: oldest_voice.channel,
-                    note: oldest_voice.note,
-                });
-    
-                *oldest_voice = new_voice;
-            }
-    
-            oldest_voice
-        }
-    }
-
-    fn start_release_for_voices(
-        &mut self,
-        _sample_rate: f32,
-        voice_id: Option<i32>,
-        channel: u8,
-        note: u8,
-    ) {
-        for voice in &mut self.voices {
-            if let Some(voice) = voice {
-                if voice_id == Some(voice.voice_id) || (channel == voice.channel && note == voice.note) {
-                    voice.releasing = true;
-                    voice.amp_envelope.set_envelope_stage(ADSREnvelopeState::Release);
-                    voice.filter_cut_envelope.set_envelope_stage(ADSREnvelopeState::Release);
-                    voice.filter_res_envelope.set_envelope_stage(ADSREnvelopeState::Release);
-                    voice.fm_envelope.set_envelope_stage(ADSREnvelopeState::Release);
-                    voice.dist_envelope.set_envelope_stage(ADSREnvelopeState::Release);
-                }
-            }
-        }
-    }
-
-    fn _find_voice(&mut self, voice_id: Option<i32>, channel: u8, note: u8) -> Option<&mut Voice> {
-        self.voices
-            .iter_mut()
-            .find(|voice| {
-                let voice_id = voice_id.clone(); // Clone the voice_id for comparison inside the closure
-                if let Some(voice) = voice {
-                    voice.voice_id == voice_id.unwrap_or(voice.voice_id)
-                        && voice.channel == channel
-                        && voice.note == note
-                } else {
-                    false
-                }
-            })
-            .map(|voice| voice.as_mut().unwrap())
-    }
-
-    fn compute_fallback_voice_id(note: u8, channel: u8, next_voice_id: i32) -> i32 {
-        // Fallback voice ID computation...
-        // Modify this function to generate a unique voice ID based on note, channel, and next_voice_id.
-        // Example implementation:
-        (note as i32) + (channel as i32) + next_voice_id
-    }
-
-    fn find_or_create_voice(
-        &mut self,
-        voice_id: Option<i32>,
-        channel: u8,
-        note: u8,
-        pan: f32,
-        pressure:f32,
-        brightness: f32,
-        expression: f32,
-        tuning: f32,
-        vibrato: f32,
-        amp_envelope: ADSREnvelope,
-        filter_cut_envelope: ADSREnvelope,
-        filter_res_envelope: ADSREnvelope,
-        vib_mod: Modulator,
-        trem_mod: Modulator,
-    ) -> &mut Voice {
-        // Search for an existing voice with the given voice_id
-        if let Some(existing_index) = self.voices.iter().position(|voice| {
-            voice
-                .as_ref()
-                .map(|voice_ref| {
-                    voice_ref.voice_id == voice_id.unwrap_or(voice_ref.voice_id)
-                        && voice_ref.channel == channel
-                        && voice_ref.note == note
-                })
-                .unwrap_or(false)
-        }) {
-            return self.voices[existing_index].as_mut().unwrap();
-        }
-
-        // If no existing voice found, create a new voice
-        let new_voice_id = voice_id.unwrap_or_else(|| {
-            // Generate a fallback voice ID
-            self.next_voice_index += 1;
-            Self::compute_fallback_voice_id(
-                note,
-                channel,
-                self.next_voice_index as i32,
-            )
-        });
-
-        let mut new_voice = Voice {
-            voice_id: new_voice_id,
-            channel,
-            note,
-            internal_voice_id: self.next_internal_voice_id,
-            velocity: 0.0,
-            velocity_sqrt: 0.0,
-            phase: 0.0,
-            phase_delta: 0.0,
-            target_phase_delta: 0.0,
-            releasing: false,
-            amp_envelope,
-            voice_gain: None,
-            filter_cut_envelope,
-            filter_res_envelope,
-            fm_envelope: ADSREnvelope::new(
-                self.params.fm_env_attack_ms.value(),
-                self.params.fm_env_amount.value(),
-                self.params.fm_env_decay_ms.value(),
-                self.params.fm_env_sustain_level.value(),
-                self.params.fm_env_release_ms.value(),
-                self.sample_rate,
-                1.0,
-                0.0,
-            ),
-            dist_envelope: ADSREnvelope::new(
-                self.params.dist_env_attack_ms.value(),
-                self.params.dist_env_amount.value(),
-                self.params.dist_env_decay_ms.value(),
-                self.params.dist_env_sustain_level.value(),
-                self.params.dist_env_release_ms.value(),
-                self.sample_rate,
-                1.0,
-                0.0,
-            ),
-            filter: Some(self.params.filter_type.value()),
-            lowpass_filter: filter::LowpassFilter::new(1000.0, 0.5, self.sample_rate),
-            highpass_filter: filter::HighpassFilter::new(1000.0, 0.5, self.sample_rate),
-            bandpass_filter: filter::BandpassFilter::new(1000.0, 0.5, self.sample_rate),
-            notch_filter: filter::NotchFilter::new(1000.0, 1.0, self.sample_rate),
-            statevariable_filter: filter::StatevariableFilter::new(1000.0, 0.5, self.sample_rate),
-            comb_filter: filter::CombFilter::new(self.sample_rate),
-            rainbow_comb_filter: filter::RainbowCombFilter::new(self.sample_rate),
-            diode_ladder_lp_filter: filter::DiodeLadderFilter::new_lowpass(self.sample_rate),
-            diode_ladder_hp_filter: filter::DiodeLadderFilter::new_highpass(self.sample_rate),
-            ms20_filter: filter::Ms20Filter::new(self.sample_rate),
-            formant_morph_filter: filter::FormantMorphFilter::new(self.sample_rate),
-            phaser_filter: filter::PhaserFilter::new(self.sample_rate),
-            comb_allpass_filter: filter::CombAllpassFilter::new(self.sample_rate),
-            bitcrush_lp_filter: filter::BitcrushLpFilter::new(self.sample_rate),
-            pan,
-            pressure,
-            brightness,
-            expression,
-            tuning,
-            vibrato,
-            vib_mod,
-            trem_mod,
-            mod_lfo1: Modulator::new(
-                self.params.lfo1_rate.value(),
-                1.0,
-                self.params.lfo1_attack.value(),
-                self.params.lfo1_shape.value(),
-            ),
-            mod_lfo2: Modulator::new(
-                self.params.lfo2_rate.value(),
-                1.0,
-                self.params.lfo2_attack.value(),
-                self.params.lfo2_shape.value(),
-            ),
-            pan_mod: Modulator::new(
-                self.params.pan_lfo_rate.value(),
-                self.params.pan_lfo_intensity.value(),
-                self.params.pan_lfo_attack.value(),
-                self.params.pan_lfo_shape.value(),
-            ),
-            drift_offset: 0.0,
-            mod_smooth: [0.0; 6],
-            fm_feedback_state: 0.0,
-            unison_phases: [0.0; 6],
-            stereo_prev: 0.0,
-            dc_blocker: filter::DCBlocker::new(),
-        };
-        new_voice.amp_envelope.trigger();
-        new_voice.filter_cut_envelope.trigger();
-        new_voice.filter_res_envelope.trigger();
-        new_voice.fm_envelope.trigger();
-        new_voice.dist_envelope.trigger();
-        new_voice.vib_mod.trigger();
-        new_voice.trem_mod.trigger();
-        // Find the next available slot for a new voice
-        let mut next_voice_index = self.next_voice_index;
-        while self.voices[next_voice_index].is_some() {
-            next_voice_index = (next_voice_index + 1) % NUM_VOICES;
-            if next_voice_index == self.next_voice_index {
-                break;
-            }
-        }
-
-        // Store the new voice in the found slot
-        self.voices[next_voice_index] = Some(new_voice);
-
-        // Update the next available slot index
-        self.next_voice_index = next_voice_index;
-
-        // Return a mutable reference to the newly created voice
-        self.voices[next_voice_index].as_mut().unwrap()
-
-    }
-
-    fn handle_poly_event(
-        &mut self,
-        _timing: u32,
-        voice_id: Option<i32>,
-        channel: u8,
-        note: u8,
-        gain: Option<f32>,
-        pan: Option<f32>,
-        brightness: Option<f32>,
-        expression: Option<f32>,
-        tuning: Option<f32>,
-        pressure: Option<f32>,
-        vibrato: Option<f32>,
-    ) {
-        let existing_index = self.voices.iter().position(|voice| {
-            voice
-                .as_ref()
-                .map(|voice_ref| {
-                    voice_id == Some(voice_ref.voice_id)
-                        || (voice_ref.channel == channel && voice_ref.note == note)
-                })
-                .unwrap_or(false)
-        });
-
-        let Some(existing_index) = existing_index else {
-            return;
-        };
-
-        let Some(voice) = self.voices[existing_index].as_mut() else {
-            return;
-        };
-
-        if let Some(gain) = gain {
-            voice.velocity = gain;
-            voice.velocity_sqrt = gain.sqrt();
-            voice.amp_envelope.set_velocity(gain);
-        }
-        if let Some(pan) = pan {
-            voice.pan = pan;
-        }
-        if let Some(brightness) = brightness {
-            voice.brightness = brightness;
-        }
-        if let Some(expression) = expression {
-            voice.expression = expression;
-        }
-        if let Some(tuning) = tuning {
-            voice.tuning = tuning;
-        }
-        if let Some(pressure) = pressure {
-            voice.pressure = pressure;
-        }
-        if let Some(vibrato) = vibrato {
-            voice.vibrato = vibrato;
-        }
-    }
-    
-    
-
-    fn choke_voices(
-        &mut self,
-        context: &mut impl ProcessContext<Self>,
-        sample_offset: u32,
-        voice_id: Option<i32>,
-        channel: u8,
-        note: u8,
-    ) {
-        for voice in self.voices.iter_mut() {
-            match voice {
-                Some(Voice {
-                    voice_id: candidate_voice_id,
-                    channel: candidate_channel,
-                    note: candidate_note,
-                    ..
-                }) if voice_id == Some(*candidate_voice_id)
-                    || (channel == *candidate_channel && note == *candidate_note) =>
-                {
-                    context.send_event(NoteEvent::VoiceTerminated {
-                        timing: sample_offset,
-                        voice_id: Some(*candidate_voice_id),
-                        channel,
-                        note,
-                    });
-                    *voice = None;
-
-                    if voice_id.is_some() {
-                        return;
-                    }
-                }
-                _ => (),
-            }
-        }
-    }
-    pub fn clip(input: f32, limit: f32) -> f32 {
-        if input > limit {
-            limit
-        } else if input < -limit {
-            -limit
-        } else {
-            input
-        }
-    }
-    pub fn poly_blep(t: f32, dt: f32) -> f32 {
-        if t < dt {
-            let t = t / dt;
-            // 2 * (t - t^2/2 - 0.5)
-            return t + t - t * t - 1.0;
-        } else if t > 1.0 - dt {
-            let t = (t - 1.0) / dt;
-            // 2 * (t^2/2 + t + 0.5)
-            return t * t + t + t + 1.0;
-        }
-        0.0
-    }
-
-    pub fn wavefold(sample: f32, amount: f32) -> f32 {
-        if amount <= 0.0 {
-            return sample;
-        }
-
-        let drive = 1.0 + amount * 8.0;
-        let x = sample * drive;
-        let mut folded = (x + 1.0).rem_euclid(4.0);
-        if folded > 2.0 {
-            folded = 4.0 - folded;
-        }
-        folded - 1.0
-    }
-}
-
-impl ClapPlugin for SubSynth {
-    const CLAP_ID: &'static str = "art.catsynth";
-    const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("A knitty gritty wavetable bass synth for dubstep and heavy electronic sound design");
-    const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
-    const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] = &[
-        ClapFeature::Instrument,
-        ClapFeature::Synthesizer,
-        ClapFeature::Stereo,
-    ];
-
-    const CLAP_POLY_MODULATION_CONFIG: Option<PolyModulationConfig> = Some(PolyModulationConfig {
-        max_voice_capacity: NUM_VOICES as u32,
-        supports_overlapping_voices: true,
-    });
-}
-
-impl Vst3Plugin for SubSynth {
-    const VST3_CLASS_ID: [u8; 16] = *b"CatSynthLing1A01";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
-        Vst3SubCategory::Instrument,
-        Vst3SubCategory::Synth,
-        Vst3SubCategory::Stereo,
-    ];
-}
-
-struct DrumBlockParams {
-    master_gain: f32,
-    master_drive: f32,
-    master_comp: f32,
-    master_clip: f32,
-    kit_preset: DrumOrganicKitPreset,
-    seq_enabled: bool,
-    seq_rate: f32,
-    seq_swing: f32,
-}
-
-
-struct DrumSynth {
-    params: Arc<DrumSynthParams>,
-    engine: DrumEngine,
-    sequencer: DrumSequencer,
-    pad_triggers: [f32; DRUM_SLOTS],
-    comp_env: f32,
-}
-
-const DRUM_AUX_OUTPUT_COUNT: usize = 16;
-const DRUM_AUX_OUTPUT_PORTS: [NonZeroU32; DRUM_AUX_OUTPUT_COUNT] =
-    [new_nonzero_u32(2); DRUM_AUX_OUTPUT_COUNT];
-const DRUM_AUX_OUTPUT_NAMES: [&str; DRUM_AUX_OUTPUT_COUNT] = [
-    "Pad 01",
-    "Pad 02",
-    "Pad 03",
-    "Pad 04",
-    "Pad 05",
-    "Pad 06",
-    "Pad 07",
-    "Pad 08",
-    "Pad 09",
-    "Pad 10",
-    "Pad 11",
-    "Pad 12",
-    "Pad 13",
-    "Pad 14",
-    "Pad 15",
-    "Pad 16",
-];
-
-fn collect_aux_outputs<'a>(
-    aux: &'a mut AuxiliaryBuffers,
-    range: std::ops::Range<usize>,
-) -> Vec<AuxOutput<'a>> {
-    if aux.outputs.is_empty() {
-        return Vec::new();
-    }
-    let mut outputs = Vec::with_capacity(aux.outputs.len());
-    for output in aux.outputs.iter_mut() {
-        let channels = output.as_slice();
-        if channels.len() < 2 {
-            continue;
-        }
-        let (left_channels, right_channels) = channels.split_at_mut(1);
-        let max_len = left_channels[0].len().min(right_channels[0].len());
-        if range.start >= max_len {
-            continue;
-        }
-        let end = range.end.min(max_len);
-        outputs.push(AuxOutput {
-            left: &mut left_channels[0][range.start..end],
-            right: &mut right_channels[0][range.start..end],
-        });
-    }
-    outputs
-}
-
-impl Default for DrumSynth {
-    fn default() -> Self {
-        Self {
-            params: Arc::new(DrumSynthParams::default()),
-            engine: DrumEngine::new(),
-            sequencer: DrumSequencer::new(),
-            pad_triggers: [0.0; DRUM_SLOTS],
-            comp_env: 0.0,
-        }
-    }
-}
-
-impl Plugin for DrumSynth {
-    const NAME: &'static str = "CatSynth Drums";
-    const VENDOR: &'static str = "CatSynth";
-    const URL: &'static str = "https://taellinglin.art";
-    const EMAIL: &'static str = "taellinglin@gmail.com";
-
-    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-
-    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
-        main_input_channels: None,
-        main_output_channels: NonZeroU32::new(2),
-        aux_output_ports: &DRUM_AUX_OUTPUT_PORTS,
-        names: PortNames {
-            main_output: Some("Main"),
-            aux_outputs: &DRUM_AUX_OUTPUT_NAMES,
-            ..PortNames::const_default()
-        },
-        ..AudioIOLayout::const_default()
-    }];
-
-    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
-    const SAMPLE_ACCURATE_AUTOMATION: bool = true;
-
-    type SysExMessage = ();
-    type BackgroundTask = ();
-
-    fn params(&self) -> Arc<dyn Params> {
-        self.params.clone()
-    }
-
-    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create_drum(self.params.clone(), self.params.editor_state.clone())
-    }
-
-    fn initialize(
-        &mut self,
-        _audio_io_layout: &AudioIOLayout,
-        buffer_config: &BufferConfig,
-        _context: &mut impl InitContext<Self>,
-    ) -> bool {
-        self.engine.set_sample_rate(buffer_config.sample_rate);
-        self.sequencer.reset();
-        true
-    }
-
-    fn reset(&mut self) {
-        self.sequencer.reset();
-        self.comp_env = 0.0;
-    }
+impl DrumSynth {
 
     fn handle_event(
         &mut self,
         _context: &mut impl ProcessContext<Self>,
-        event: NoteEvent<Self>,
+        event: NoteEvent<()>,
         kit: DrumOrganicKitPreset,
     ) {
         match event {
@@ -2172,124 +2349,4 @@ impl Plugin for DrumSynth {
             }
         }
     }
-
-    fn process(
-        &mut self,
-        buffer: &mut Buffer,
-        aux: &mut AuxiliaryBuffers,
-        context: &mut impl ProcessContext<Self>,
-    ) -> ProcessStatus {
-        let num_samples = buffer.samples();
-        let sample_rate = context.transport().sample_rate;
-        let output = buffer.as_slice();
-        if output.len() < 2 {
-            for channel in output.iter_mut() {
-                channel.fill(0.0);
-            }
-            return ProcessStatus::Normal;
-        }
-
-        let (left_slice, right_slice) = output.split_at_mut(1);
-        let left = &mut left_slice[0];
-        let right = &mut right_slice[0];
-        left.fill(0.0);
-        right.fill(0.0);
-
-        if !aux.outputs.is_empty() {
-            for output in aux.outputs.iter_mut() {
-                for channel in output.as_slice().iter_mut() {
-                    channel.fill(0.0);
-                }
-            }
-        }
-
-        let kit = self.params.kit_preset.value();
-        self.handle_pad_triggers(kit);
-
-        let mut next_event = context.next_event();
-        let mut block_start: usize = 0;
-        let mut block_end: usize = MAX_BLOCK_SIZE.min(num_samples);
-
-        while block_start < num_samples {
-            'events: loop {
-                match next_event {
-                    Some(event) if (event.timing() as usize) < block_end => {
-                        self.handle_event(context, event, kit);
-                        next_event = context.next_event();
-                    }
-                    Some(event) if (event.timing() as usize) < block_end => {
-                        block_end = event.timing() as usize;
-                        break 'events;
-                    }
-                    _ => break 'events,
-                }
-            }
-
-            let block_params = DrumBlockParams {
-                master_gain: self.params.master_gain.value().clamp(0.0, 1.0),
-                master_drive: self.params.master_drive.value().clamp(0.0, 1.0),
-                master_comp: self.params.master_comp.value().clamp(0.0, 1.0),
-                master_clip: self.params.master_clip.value().clamp(0.0, 1.0),
-                kit_preset: kit,
-                seq_enabled: self.params.sequencer.enabled.value(),
-                seq_rate: self.params.sequencer.rate.value(),
-                seq_swing: self.params.sequencer.swing.value(),
-            };
-
-            let tempo = context.transport().tempo.unwrap_or(120.0) as f32;
-
-            self.render_block_drums(
-                block_start,
-                block_end,
-                left,
-                right,
-                aux,
-                &block_params,
-                tempo,
-                sample_rate,
-            );
-
-            self.apply_block_fx(
-                block_start,
-                block_end,
-                left,
-                right,
-                &block_params,
-                sample_rate,
-            );
-
-            block_start = block_end;
-            block_end = (block_start + MAX_BLOCK_SIZE).min(num_samples);
-        }
-
-        ProcessStatus::Normal
-    }
 }
-
-impl ClapPlugin for DrumSynth {
-    const CLAP_ID: &'static str = "art.catsynth.drums";
-    const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("Physical modeling drum synth with 16-slot sequencer");
-    const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
-    const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] = &[
-        ClapFeature::Instrument,
-        ClapFeature::Synthesizer,
-        ClapFeature::Drum,
-        ClapFeature::DrumMachine,
-        ClapFeature::Stereo,
-    ];
-}
-
-impl Vst3Plugin for DrumSynth {
-    const VST3_CLASS_ID: [u8; 16] = *b"CatDrumLing1A01X";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
-        Vst3SubCategory::Instrument,
-        Vst3SubCategory::Synth,
-        Vst3SubCategory::Drum,
-        Vst3SubCategory::Stereo,
-    ];
-}
-
-nih_export_clap!(DrumSynth);
-nih_export_vst3!(DrumSynth);

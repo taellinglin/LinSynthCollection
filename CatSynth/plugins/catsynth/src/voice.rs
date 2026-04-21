@@ -3,7 +3,7 @@ use crate::modulator::Modulator;
 use crate::envelope::ADSREnvelope;
 use crate::filter;
 use crate::filter::FilterType;
-use crate::eq::Biquad;
+// use crate::eq::Biquad;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Voice {
